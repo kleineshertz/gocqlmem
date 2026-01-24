@@ -1,0 +1,146 @@
+package eval
+
+import (
+	"fmt"
+
+	"github.com/shopspring/decimal"
+)
+
+func castNumberToStandardType(arg any) (any, error) {
+	switch typedArg := arg.(type) {
+	case int:
+		return int64(typedArg), nil
+	case int16:
+		return int64(typedArg), nil
+	case int32:
+		return int64(typedArg), nil
+	case int64:
+		return typedArg, nil
+	case float32:
+		return float64(typedArg), nil
+	case float64:
+		return typedArg, nil
+	case decimal.Decimal:
+		return typedArg, nil
+	default:
+		return 0.0, fmt.Errorf("cannot cast %v(%T) to standard number type, unsuported type", typedArg, typedArg)
+	}
+}
+
+func castNumberPairToCommonType(argLeft any, argRight any) (any, any, error) {
+	stdArgLeft, err := castNumberToStandardType(argLeft)
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid left arg: %s", err.Error())
+	}
+	stdArgRight, err := castNumberToStandardType(argRight)
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid right arg: %s", err.Error())
+	}
+	// Check for float64
+	_, floatLeft := stdArgLeft.(float64)
+	_, floatRight := stdArgRight.(float64)
+	if floatLeft || floatRight {
+		finalArgLeft, err := CastToFloat64(stdArgLeft)
+		if err != nil {
+			return nil, nil, fmt.Errorf("unexpectedly cannot cast left arg to float64: %s", err.Error())
+		}
+		finalArgRight, err := CastToFloat64(stdArgRight)
+		if err != nil {
+			return nil, nil, fmt.Errorf("unexpectedly cannot cast right arg to float64: %s", err.Error())
+		}
+		return finalArgLeft, finalArgRight, nil
+	}
+
+	// Check for decimal
+	_, decLeft := stdArgLeft.(decimal.Decimal)
+	_, decRight := stdArgRight.(decimal.Decimal)
+	if decLeft || decRight {
+		finalArgLeft, err := CastToDecimal(stdArgLeft)
+		if err != nil {
+			return nil, nil, fmt.Errorf("unexpectedly cannot cast left arg to decimal: %s", err.Error())
+		}
+		finalArgRight, err := CastToDecimal(stdArgRight)
+		if err != nil {
+			return nil, nil, fmt.Errorf("unexpectedly cannot cast right arg to decimal: %s", err.Error())
+		}
+		return finalArgLeft, finalArgRight, nil
+	}
+
+	// Cast both to int64
+	finalArgLeft, err := CastToInt64(stdArgLeft)
+	if err != nil {
+		return nil, nil, fmt.Errorf("unexpectedly cannot cast left arg to int64: %s", err.Error())
+	}
+	finalArgRight, err := CastToInt64(stdArgRight)
+	if err != nil {
+		return nil, nil, fmt.Errorf("unexpectedly cannot cast right arg to int64: %s", err.Error())
+	}
+	return finalArgLeft, finalArgRight, nil
+}
+
+func CastToInt64(arg any) (int64, error) {
+	switch typedArg := arg.(type) {
+	case int:
+		return int64(typedArg), nil
+	case int16:
+		return int64(typedArg), nil
+	case int32:
+		return int64(typedArg), nil
+	case int64:
+		return typedArg, nil
+	case float32:
+		return int64(typedArg), nil
+	case float64:
+		return int64(typedArg), nil
+	case decimal.Decimal:
+		if typedArg.IsInteger() {
+			return typedArg.BigInt().Int64(), nil
+		}
+		return 0.0, fmt.Errorf("cannot cast decimal '%v' to int64, exact conversion impossible", typedArg)
+	default:
+		return 0.0, fmt.Errorf("cannot cast %v(%T) to int64, unsuported type", typedArg, typedArg)
+	}
+}
+
+func CastToFloat64(arg any) (float64, error) {
+	switch typedArg := arg.(type) {
+	case int:
+		return float64(typedArg), nil
+	case int16:
+		return float64(typedArg), nil
+	case int32:
+		return float64(typedArg), nil
+	case int64:
+		return float64(typedArg), nil
+	case float32:
+		return float64(typedArg), nil
+	case float64:
+		return typedArg, nil
+	case decimal.Decimal:
+		valFloat, _ := typedArg.Float64()
+		return valFloat, nil
+	default:
+		return 0.0, fmt.Errorf("cannot cast %v(%T) to float64, unsuported type", typedArg, typedArg)
+	}
+}
+
+func CastToDecimal(arg any) (decimal.Decimal, error) {
+	switch typedArg := arg.(type) {
+	case int:
+		return decimal.NewFromInt(int64(typedArg)), nil
+	case int16:
+		return decimal.NewFromInt(int64(typedArg)), nil
+	case int32:
+		return decimal.NewFromInt(int64(typedArg)), nil
+	case int64:
+		return decimal.NewFromInt(typedArg), nil
+	case float32:
+		return decimal.NewFromFloat32(typedArg), nil
+	case float64:
+		return decimal.NewFromFloat(typedArg), nil
+	case decimal.Decimal:
+		return typedArg, nil
+	default:
+		return decimal.NewFromInt(0), fmt.Errorf("cannot cast %v(%T) to decimal, unsuported type", typedArg, typedArg)
+	}
+}

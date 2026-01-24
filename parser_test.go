@@ -143,7 +143,7 @@ func TestDropTable(t *testing.T) {
 }
 
 func TestSelect(t *testing.T) {
-	cmds, err := ParseCommands(`SELECT sum(f1) - ' FROM ', f2 + ' , ', (f3 * 3 = 9) = TRUE AND 1=1 OR FALSE FROM ks1.t1 WHERE f1 / 2 = 10 and (f2 = 'a"') ORDER BY f1 asc, f2 desc LIMIT 10`)
+	cmds, err := ParseCommands(`SELECT sum(f1) - ' FROM ', f2 + ' , ', (f3 * 3 = 9) = TRUE AND 1=NULL OR FALSE FROM ks1.t1 WHERE f1 / 2 = 10 and (f2 = 'a"') ORDER BY f1 asc, f2 desc LIMIT 10`)
 	assert.Nil(t, err)
 	cmd, ok := cmds[0].(*CommandSelect)
 	assert.True(t, ok)
@@ -173,7 +173,8 @@ func TestSelect(t *testing.T) {
 	assert.Equal(t, "&&", cmd.SelectExpLexems[2][9].V)
 	assert.Equal(t, "1", cmd.SelectExpLexems[2][10].V)
 	assert.Equal(t, "==", cmd.SelectExpLexems[2][11].V)
-	assert.Equal(t, "1", cmd.SelectExpLexems[2][12].V)
+	assert.Equal(t, "NULL", cmd.SelectExpLexems[2][12].V)
+	assert.Equal(t, LexemNull, cmd.SelectExpLexems[2][12].T)
 	assert.Equal(t, "||", cmd.SelectExpLexems[2][13].V)
 	assert.Equal(t, "FALSE", cmd.SelectExpLexems[2][14].V)
 
@@ -198,15 +199,19 @@ func TestSelect(t *testing.T) {
 
 	assert.Equal(t, "10", cmd.Limit.V)
 
-	cmds, err = ParseCommands(`SELECT f1 FROM ks1.t1; ; ;SELECT f2 FROM ks1.t2; ; ;`)
+	cmds, err = ParseCommands(`SELECT f1 AS ff11 FROM ks1.t1; ; ;SELECT f2 FROM ks1.t2; ; ;`)
 	assert.Nil(t, err)
 
 	assert.Equal(t, 2, len(cmds))
 
 	cmd, ok = cmds[0].(*CommandSelect)
 	assert.True(t, ok)
+
 	assert.Equal(t, "ks1", cmd.CtxKeyspace)
 	assert.Equal(t, "f1", cmd.SelectExpLexems[0][0].V)
+	assert.Equal(t, LexemAs, cmd.SelectExpLexems[0][1].T)
+	assert.Equal(t, "ff11", cmd.SelectExpLexems[0][2].V)
+
 	assert.Equal(t, "t1", cmd.TableName)
 
 	cmd, ok = cmds[1].(*CommandSelect)
@@ -223,7 +228,7 @@ func TestSelect(t *testing.T) {
 }
 
 func TestInsert(t *testing.T) {
-	cmds, err := ParseCommands(`USE ks1;INSERT INTO t1 (f1,f2,f3) values ('a',2,TRUE) IF NOT EXISTS`)
+	cmds, err := ParseCommands(`USE ks1;INSERT INTO t1 (f1,f2,f3) values ('a',NULL,TRUE) IF NOT EXISTS`)
 	assert.Nil(t, err)
 	cmd, ok := cmds[1].(*CommandInsert)
 	assert.True(t, ok)
@@ -233,6 +238,9 @@ func TestInsert(t *testing.T) {
 
 	assert.Equal(t, "f1", cmd.ColumnNames[0])
 	assert.Equal(t, "a", cmd.ColumnValues[0].V)
+	assert.Equal(t, "f2", cmd.ColumnNames[1])
+	assert.Equal(t, "NULL", cmd.ColumnValues[1].V)
+	assert.Equal(t, LexemNull, cmd.ColumnValues[1].T)
 
 	assert.True(t, cmd.IfNotExists)
 
@@ -244,7 +252,7 @@ func TestInsert(t *testing.T) {
 }
 
 func TestUpdate(t *testing.T) {
-	cmds, err := ParseCommands(`UPDATE ks1.t1 SET f1 = 1+2, f2 = 'a'='b', f3 = token(f2) WHERE f1 = 10 AND f2 IN ( 'c', 'd') OR f2 NOT IN ('e') IF EXISTS`)
+	cmds, err := ParseCommands(`UPDATE ks1.t1 SET f1 = 1+2, f2 = 'a'='b', f3 = token(f2), f4=NULL WHERE f1 = 10 AND f2 IN ( 'c', 'd') OR f2 NOT IN ('e') IF EXISTS`)
 	assert.Nil(t, err)
 	cmd, ok := cmds[0].(*CommandUpdate)
 	assert.True(t, ok)
@@ -267,6 +275,10 @@ func TestUpdate(t *testing.T) {
 	assert.Equal(t, "(", cmd.ColumnSetExpressions[2].ExpLexems[1].V)
 	assert.Equal(t, "f2", cmd.ColumnSetExpressions[2].ExpLexems[2].V)
 	assert.Equal(t, ")", cmd.ColumnSetExpressions[2].ExpLexems[3].V)
+
+	assert.Equal(t, "f4", cmd.ColumnSetExpressions[3].Name)
+	assert.Equal(t, "NULL", cmd.ColumnSetExpressions[3].ExpLexems[0].V)
+	assert.Equal(t, LexemNull, cmd.ColumnSetExpressions[3].ExpLexems[0].T)
 
 	assert.Equal(t, "f1", cmd.WhereExpLexems[0].V)
 	assert.Equal(t, "==", cmd.WhereExpLexems[1].V)
@@ -303,7 +315,7 @@ func TestUpdate(t *testing.T) {
 }
 
 func TestDelete(t *testing.T) {
-	cmds, err := ParseCommands(`USE ks1;DELETE FROM t1 WHERE f1 = TRUE IF EXISTS;DELETE FROM ks2.t1`)
+	cmds, err := ParseCommands(`USE ks1;DELETE FROM t1 WHERE f1 = NULL IF EXISTS;DELETE FROM ks2.t1`)
 	assert.Nil(t, err)
 	cmd, ok := cmds[1].(*CommandDelete)
 	assert.True(t, ok)
@@ -313,8 +325,8 @@ func TestDelete(t *testing.T) {
 
 	assert.Equal(t, "f1", cmd.WhereExpLexems[0].V)
 	assert.Equal(t, "==", cmd.WhereExpLexems[1].V)
-	assert.Equal(t, LexemBoolLiteral, cmd.WhereExpLexems[2].T)
-	assert.Equal(t, "TRUE", cmd.WhereExpLexems[2].V)
+	assert.Equal(t, LexemNull, cmd.WhereExpLexems[2].T)
+	assert.Equal(t, "NULL", cmd.WhereExpLexems[2].V)
 
 	assert.True(t, cmd.IfExists)
 

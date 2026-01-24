@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strconv"
 	"sync"
+
+	"github.com/capillariesio/cqlmem/eval"
 )
 
 type PrimaryKeyType int
@@ -16,41 +19,44 @@ const (
 	PrimaryKeyNone
 )
 
-type DataTypeType int
+type CqlDataTypeType int
 
 const (
-	DataTypeBigint DataTypeType = iota
-	DataTypeText
-	DataTypeDecimal
-	DataTypeFloat
-	DataTypeBool
-	DataTypeTimestamp
-	DataTypeUnknown
+	CqlDataTypeBigint CqlDataTypeType = iota
+	CqlDataTypeTinyint
+	CqlDataTypeSmallint
+	CqlDataTypeText
+	CqlDataTypeVarchar
+	CqlDataTypeDecimal
+	CqlDataTypeFloat
+	CqlDataTypeBool
+	CqlDataTypeTimestamp
+	CqlDataTypeUnknown
 )
 
-func stringToDataType(s string) (DataTypeType, error) {
+func stringToDataType(s string) (CqlDataTypeType, error) {
 	switch s {
 	case "BIGINT":
-		return DataTypeBigint, nil
+		return CqlDataTypeBigint, nil
 	case "TEXT":
-		return DataTypeText, nil
+		return CqlDataTypeText, nil
 	case "DECIMAL":
-		return DataTypeDecimal, nil
+		return CqlDataTypeDecimal, nil
 	case "FLOAT":
-		return DataTypeFloat, nil
+		return CqlDataTypeFloat, nil
 	case "BOOLEAN":
-		return DataTypeBool, nil
+		return CqlDataTypeBool, nil
 	case "TIMESTAMP":
-		return DataTypeTimestamp, nil
+		return CqlDataTypeTimestamp, nil
 	default:
-		return DataTypeUnknown, fmt.Errorf("unsupported data type %s", s)
+		return CqlDataTypeUnknown, fmt.Errorf("unsupported data type %s", s)
 	}
 }
 
 type ColumnDef struct {
 	Name            string
 	PrimaryKey      PrimaryKeyType
-	DataType        DataTypeType
+	DataType        CqlDataTypeType
 	ClusteringOrder ClusteringOrderType
 }
 
@@ -62,7 +68,7 @@ type Table struct {
 	Lock         sync.RWMutex
 }
 
-func createColDef(name string, mapColType map[string]DataTypeType, mapColClusteringOrder map[string]ClusteringOrderType) (*ColumnDef, error) {
+func createColDef(name string, mapColType map[string]CqlDataTypeType, primaryKeyType PrimaryKeyType, mapColClusteringOrder map[string]ClusteringOrderType) (*ColumnDef, error) {
 	dataType, ok := mapColType[name]
 	if !ok {
 		return nil, fmt.Errorf("cannot find definition for column %s", name)
@@ -71,12 +77,16 @@ func createColDef(name string, mapColType map[string]DataTypeType, mapColCluster
 	if !ok {
 		clusteringOrder = ClusteringOrderNone
 	}
+	// For partition keys force ASC, we need it for our internal purposes when we walk through values
+	if primaryKeyType == PrimaryKeyPartition {
+		clusteringOrder = ClusteringOrderAsc
+	}
 	if !ok {
 		return nil, fmt.Errorf("cannot find definition for column %s", name)
 	}
 	return &ColumnDef{
 		Name:            name,
-		PrimaryKey:      PrimaryKeyPartition,
+		PrimaryKey:      primaryKeyType,
 		DataType:        dataType,
 		ClusteringOrder: clusteringOrder,
 	}, nil
@@ -90,7 +100,7 @@ func newTable(cmd *CommandCreateTable) (*Table, error) {
 		ColumnDefMap: map[string]int{},
 	}
 
-	mapColType := map[string]DataTypeType{}
+	mapColType := map[string]CqlDataTypeType{}
 	var err error
 	for _, createTableColDef := range cmd.ColumnDefs {
 		if mapColType[createTableColDef.Name], err = stringToDataType(createTableColDef.Type); err != nil {
@@ -123,7 +133,7 @@ func newTable(cmd *CommandCreateTable) (*Table, error) {
 	t.ColumnDefMap = map[string]int{}
 	// Partition columns first
 	for _, name := range cmd.PartitionKeyColumns {
-		if t.ColumnDefs[colDefIdx], err = createColDef(name, mapColType, mapColClusteringOrder); err != nil {
+		if t.ColumnDefs[colDefIdx], err = createColDef(name, mapColType, PrimaryKeyPartition, mapColClusteringOrder); err != nil {
 			return nil, err
 		}
 		t.ColumnDefMap[name] = colDefIdx
@@ -131,7 +141,7 @@ func newTable(cmd *CommandCreateTable) (*Table, error) {
 	}
 	// Clustering columns next
 	for _, name := range cmd.ClusteringKeyColumns {
-		if t.ColumnDefs[colDefIdx], err = createColDef(name, mapColType, mapColClusteringOrder); err != nil {
+		if t.ColumnDefs[colDefIdx], err = createColDef(name, mapColType, PrimaryKeyClustering, mapColClusteringOrder); err != nil {
 			return nil, err
 		}
 		t.ColumnDefMap[name] = colDefIdx
@@ -140,7 +150,7 @@ func newTable(cmd *CommandCreateTable) (*Table, error) {
 	// All other columns next, in the order of appearance in the CREATE TABLE cmd
 	for _, createTableColDef := range cmd.ColumnDefs {
 		if _, ok := t.ColumnDefMap[createTableColDef.Name]; !ok {
-			if t.ColumnDefs[colDefIdx], err = createColDef(createTableColDef.Name, mapColType, mapColClusteringOrder); err != nil {
+			if t.ColumnDefs[colDefIdx], err = createColDef(createTableColDef.Name, mapColType, PrimaryKeyNone, mapColClusteringOrder); err != nil {
 				return nil, err
 			}
 			t.ColumnDefMap[createTableColDef.Name] = colDefIdx
@@ -167,6 +177,14 @@ type ClusteringKeyEntry struct {
 
 func (t *Table) getRowSequenceFromColumnDefAndSelectOrderBy(orderByFieldsFromSelect []*OrderByField) ([]int, error) {
 	totalRows := len(t.ColumnValues[0])
+	if len(orderByFieldsFromSelect) == 0 {
+		result := make([]int, totalRows)
+		for i := range totalRows {
+			result[i] = i
+		}
+		return result, nil
+	}
+
 	tempClusteringKey := make([]ClusteringKeyEntry, totalRows)
 	for _, orderByFieldFromSelect := range orderByFieldsFromSelect {
 		// Each field from SELECT ORDER by must be a clustering key
@@ -197,7 +215,7 @@ func (t *Table) getRowSequenceFromColumnDefAndSelectOrderBy(orderByFieldsFromSel
 			if colIdx == 0 {
 				tempClusteringKey[i] = ClusteringKeyEntry{Idx: i, Key: fmt.Sprintf("0x%08X", lastTempClusteringKeySegment)}
 			} else {
-				tempClusteringKey[i].Key = fmt.Sprintf("%s0x%08X", tempClusteringKey[i].Key, lastTempClusteringKeySegment)
+				tempClusteringKey[i] = ClusteringKeyEntry{Idx: i, Key: fmt.Sprintf("%s0x%08X", tempClusteringKey[i].Key, lastTempClusteringKeySegment)}
 			}
 		}
 	}
@@ -213,6 +231,289 @@ func (t *Table) getRowSequenceFromColumnDefAndSelectOrderBy(orderByFieldsFromSel
 	return result, nil
 }
 
-// func (t *Table) select(cmd *CommandSelect) error {
+func convertLexemToInternalType(lexem *Lexem, cqlType CqlDataTypeType) (any, error) {
+	if lexem.T == LexemNull {
+		return nil, nil
+	}
+	switch cqlType {
+	case CqlDataTypeBigint, CqlDataTypeTinyint, CqlDataTypeSmallint:
+		if lexem.T != LexemNumberLiteral {
+			return 0, fmt.Errorf("cannot convert %v to integer, lexem type %d not supported", lexem.V, lexem.T)
+		}
+		val, err := strconv.Atoi(lexem.V)
+		if err != nil {
+			return 0, fmt.Errorf("cannot convert %v to integer: %s", lexem.V, err.Error())
+		}
+		return int64(val), nil
 
-// }
+	case CqlDataTypeText, CqlDataTypeVarchar:
+		if lexem.T != LexemStringLiteral {
+			return 0, fmt.Errorf("cannot convert %v to string, lexem type %d not supported", lexem.V, lexem.T)
+		}
+		return lexem.V, nil
+
+	case CqlDataTypeBool:
+		if lexem.T != LexemBoolLiteral {
+			return 0, fmt.Errorf("cannot convert %v to bool, lexem type %d not supported", lexem.V, lexem.T)
+		}
+		return lexem.V == "TRUE", nil
+
+	default:
+		return 0, fmt.Errorf("unknown column type %v", cqlType)
+	}
+}
+
+func castToInternalType(val any, cqlType CqlDataTypeType) (any, error) {
+	switch cqlType {
+	case CqlDataTypeBigint, CqlDataTypeTinyint, CqlDataTypeSmallint:
+		typedVal, ok := any(val).(int64)
+		if !ok {
+			return 0, fmt.Errorf("cast %v to int64 failed", val)
+		}
+		return typedVal, nil
+
+	case CqlDataTypeText, CqlDataTypeVarchar:
+		typedVal, ok := any(val).(string)
+		if !ok {
+			return 0, fmt.Errorf("cast %v to string failed", val)
+		}
+		return typedVal, nil
+
+	default:
+		return 0, fmt.Errorf("unknown column type %v", cqlType)
+	}
+}
+
+func compareInternalType(left any, right any, cqlType CqlDataTypeType) (int, error) {
+	if left == nil {
+		return 0, fmt.Errorf("left is nil, not allowed in partition/clustering key comparison, dev error")
+	}
+	if right == nil {
+		return 0, fmt.Errorf("right is nil, not allowed in partition/clustering key comparison, dev error")
+	}
+	switch cqlType {
+	case CqlDataTypeBigint, CqlDataTypeTinyint, CqlDataTypeSmallint:
+		typedLeft, okLeft := any(left).(int64)
+		if !okLeft {
+			return 0, fmt.Errorf("left cast %v to int64 failed", left)
+		}
+		typedRight, okRight := any(right).(int64)
+		if !okRight {
+			return 0, fmt.Errorf("right cast %v to int64 failed", right)
+		}
+		return cmp.Compare(typedLeft, typedRight), nil
+	case CqlDataTypeText, CqlDataTypeVarchar:
+		typedLeft, okLeft := any(left).(string)
+		if !okLeft {
+			return 0, fmt.Errorf("left cast %v to string failed", left)
+		}
+		typedRight, okRight := any(right).(string)
+		if !okRight {
+			return 0, fmt.Errorf("right cast %v to string failed", right)
+		}
+		return cmp.Compare(typedLeft, typedRight), nil
+	default:
+		return 0, fmt.Errorf("unknown column type %v", cqlType)
+	}
+}
+
+func getRowIndexFromColumnDefAndInsert(columnValues [][]any, columnDefs []*ColumnDef, insertedColumnValues map[string]any) (int, bool, error) {
+	topIdx := 0                       // Top candidate for replacement
+	bottomIdx := len(columnValues[0]) // One step below the last candidate
+	var isExists bool
+	for tableColIdx, tableColDef := range columnDefs {
+		insertedColVal := insertedColumnValues[tableColDef.Name]
+		newStartIdx := -1
+		newEndIdx := -1
+		curIdx := topIdx
+		for curIdx < bottomIdx {
+			curVal := columnValues[tableColIdx][curIdx]
+			compareResult, err := compareInternalType(curVal, insertedColVal, tableColDef.DataType)
+			if err != nil {
+				return 0, false, fmt.Errorf("cannot compare existing %v to inserted %v", curVal, insertedColVal)
+			}
+			if tableColDef.ClusteringOrder == ClusteringOrderDesc {
+				compareResult *= -1
+			}
+			if compareResult == 0 {
+				if newStartIdx == -1 {
+					newStartIdx = curIdx
+				}
+				newEndIdx = curIdx + 1
+			} else if compareResult == 1 {
+				// curVal > insertedColVal (ASC) or curVal < insertedColVal (DESC), time to end looking
+				if newStartIdx == -1 {
+					return curIdx, false, nil
+				}
+				newEndIdx = curIdx
+				break
+			}
+			curIdx++
+		}
+		if newStartIdx == -1 {
+			// No equal or greater (ASC) or smaller (DESC) values found in this column,
+			// ready to insert in the previously harvested range startIdx,endIdx
+			if tableColDef.ClusteringOrder == ClusteringOrderAsc {
+				return bottomIdx, false, nil
+			}
+			return bottomIdx, false, nil
+		}
+		// Now we have a range of size at least to, say:
+		// newStartIdx = 5 (with value eq to the inserted one)
+		// newEndIdx = 6 (with value > to the inserted one, or beyond the range)
+
+		// Proceed to the next key column with updated range
+		topIdx = newStartIdx
+		bottomIdx = newEndIdx
+
+		// If there are no more key columns, insert here
+		if tableColIdx == len(columnDefs)-1 || columnDefs[tableColIdx+1].PrimaryKey == PrimaryKeyNone {
+			isExists = true
+			break
+		}
+	}
+	return bottomIdx, isExists, nil
+}
+
+func (t *Table) execInsert(cmd *CommandInsert) (bool, error) {
+	t.Lock.Lock()
+	defer t.Lock.Unlock()
+
+	for _, tableColDef := range t.ColumnDefs {
+		if tableColDef.PrimaryKey == PrimaryKeyPartition || tableColDef.PrimaryKey == PrimaryKeyClustering {
+			var isPresent bool
+			for _, colName := range cmd.ColumnNames {
+				if colName == tableColDef.Name {
+					isPresent = true
+					break
+				}
+			}
+			if !isPresent {
+				return false, fmt.Errorf("partition/clustering column key %s must be specified in the insert command", tableColDef.Name)
+			}
+		}
+	}
+
+	var err error
+	insertedColumnValues := map[string]any{}
+	for i, name := range cmd.ColumnNames {
+		insertedColumnValues[name], err = convertLexemToInternalType(cmd.ColumnValues[i], t.ColumnDefs[t.ColumnDefMap[name]].DataType)
+		if err != nil {
+			return false, fmt.Errorf("cannot cast inserted column %d: %s", i, err.Error())
+		}
+		if insertedColumnValues[name] == nil && (t.ColumnDefs[t.ColumnDefMap[name]].PrimaryKey == PrimaryKeyPartition || t.ColumnDefs[t.ColumnDefMap[name]].PrimaryKey == PrimaryKeyClustering) {
+			return false, fmt.Errorf("cannot insert NULL into a partition/clustered key column %s", name)
+		}
+	}
+
+	var insertIdx int
+	var isAlreadyExists bool
+
+	if len(t.ColumnValues[0]) > 0 {
+		insertIdx, isAlreadyExists, err = getRowIndexFromColumnDefAndInsert(t.ColumnValues, t.ColumnDefs, insertedColumnValues)
+		if err != nil {
+			return false, fmt.Errorf("cannot find insert idx for %v: %s", insertedColumnValues, err.Error())
+		}
+
+		if isAlreadyExists && cmd.IfNotExists {
+			return false, nil
+		}
+
+		if isAlreadyExists && !cmd.IfNotExists {
+			return false, fmt.Errorf("cannot insert duplicate %v", insertedColumnValues)
+		}
+
+		for tableColIdx, tableColDef := range t.ColumnDefs {
+			val, ok := insertedColumnValues[tableColDef.Name]
+			if !ok {
+				val = nil
+			}
+			t.ColumnValues[tableColIdx] = slices.Insert(t.ColumnValues[tableColIdx], insertIdx, val)
+		}
+	} else {
+		for tableColIdx, tableColDef := range t.ColumnDefs {
+			val, ok := insertedColumnValues[tableColDef.Name]
+			if !ok {
+				val = nil
+			}
+			t.ColumnValues[tableColIdx] = append(t.ColumnValues[tableColIdx], val)
+		}
+	}
+
+	return true, nil
+}
+
+func (t *Table) execSelect(cmd *CommandSelect) ([]string, [][]any, error) {
+	t.Lock.RLock()
+	defer t.Lock.RUnlock()
+
+	selectSeq, err := t.getRowSequenceFromColumnDefAndSelectOrderBy(cmd.OrderByFields)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	resultNames := []string{}
+	for _, selectLexems := range cmd.SelectExpLexems {
+		s, as, err := lexemsToString(selectLexems)
+		if err != nil {
+			return nil, nil, err
+		}
+		if as == "" {
+			as = s
+		}
+		resultNames = append(resultNames, as)
+	}
+
+	resultRows := [][]any{}
+	valMap := eval.VarValuesMap{}
+	valMap[""] = map[string]any{}
+	for _, i := range selectSeq {
+		resultRow := []any{}
+		for colIdx, colDef := range t.ColumnDefs {
+			valMap[""][colDef.Name] = t.ColumnValues[colIdx][i]
+		}
+
+		eCtx := eval.NewPlainEvalCtx(nil, nil, valMap)
+		isIncludeAny, err := eCtx.Eval(cmd.WhereExpAst)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		isInclude, ok := isIncludeAny.(bool)
+		if !ok {
+			return nil, nil, fmt.Errorf("where expressions return %T, expected bool", isIncludeAny)
+		}
+
+		if isInclude {
+			for _, selectExpAst := range cmd.SelectExpAsts {
+				eCtx := eval.NewPlainEvalCtx(nil, nil, valMap)
+				val, err := eCtx.Eval(selectExpAst)
+				if err != nil {
+					return nil, nil, err
+				}
+				resultRow = append(resultRow, val)
+			}
+			resultRows = append(resultRows, resultRow)
+		}
+	}
+
+	return resultNames, resultRows, nil
+}
+
+func (t *Table) update(cmd *CommandUpdate) (bool, error) {
+	t.Lock.Lock()
+	defer t.Lock.Unlock()
+
+	// TODO: update
+
+	return false, nil
+}
+
+func (t *Table) execDelete(cmd *CommandDelete) (bool, error) {
+	t.Lock.Lock()
+	defer t.Lock.Unlock()
+
+	// TODO: delete
+
+	return false, nil
+}

@@ -24,6 +24,8 @@ const (
 	LexemLogicalOp
 	LexemCqlOp
 	LexemParenthesis
+	LexemNull
+	LexemAs
 )
 
 type Lexem struct {
@@ -150,6 +152,7 @@ type CommandSelect struct {
 	OrderByFields   []*OrderByField
 	Limit           *Lexem
 	SelectExpAsts   []ast.Expr
+	SelectExpNames  []string
 	WhereExpAst     ast.Expr
 }
 
@@ -217,6 +220,26 @@ func getStringLiteral(s string) (*Lexem, string) {
 	litRange := r.FindStringIndex(s)
 	if len(litRange) >= 2 {
 		return &Lexem{LexemStringLiteral, s[1 : litRange[1]-1]}, s[litRange[1]:]
+	}
+	return nil, s
+}
+
+func getNull(s string) (*Lexem, string) {
+	s = skipBlank(s)
+	r := regexp.MustCompile(`^(?i)NULL`)
+	litRange := r.FindStringIndex(s)
+	if len(litRange) >= 2 {
+		return &Lexem{LexemNull, s[0:litRange[1]]}, s[litRange[1]:]
+	}
+	return nil, s
+}
+
+func getAs(s string) (*Lexem, string) {
+	s = skipBlank(s)
+	r := regexp.MustCompile(`^(?i)AS`)
+	litRange := r.FindStringIndex(s)
+	if len(litRange) >= 2 {
+		return &Lexem{LexemAs, s[0:litRange[1]]}, s[litRange[1]:]
 	}
 	return nil, s
 }
@@ -352,7 +375,15 @@ func getSelectExpression(s string) ([]*Lexem, string) {
 		if l != nil {
 			break
 		}
+		if l, s = getAs(s); l != nil {
+			exp = append(exp, l)
+			continue
+		}
 		if l, s = getBoolLiteral(s); l != nil {
+			exp = append(exp, l)
+			continue
+		}
+		if l, s = getNull(s); l != nil {
 			exp = append(exp, l)
 			continue
 		}
@@ -501,6 +532,10 @@ func getWhereExpression(s string) ([]*Lexem, string, error) {
 			continue
 		}
 		if l, s = getBoolLiteral(s); l != nil {
+			exp = append(exp, l)
+			continue
+		}
+		if l, s = getNull(s); l != nil {
 			exp = append(exp, l)
 			continue
 		}
@@ -717,6 +752,14 @@ func getColumnSetExpressionLexems(s string) ([]*Lexem, string) {
 		if l != nil {
 			break
 		}
+		if l, s = getBoolLiteral(s); l != nil {
+			lexems = append(lexems, l)
+			continue
+		}
+		if l, s = getNull(s); l != nil {
+			lexems = append(lexems, l)
+			continue
+		}
 		if l, s = getStringLiteral(s); l != nil {
 			lexems = append(lexems, l)
 			continue
@@ -781,22 +824,49 @@ func getColumnSetExpressions(s string) ([]*ColumnSetExp, string, error) {
 	return columnsSetExpList, s, nil
 }
 
-func lexemsToAst(lexems []*Lexem) (ast.Expr, error) {
+func lexemsToString(lexems []*Lexem) (string, string, error) {
 	sb := strings.Builder{}
-	for _, l := range lexems {
+	var as string
+	for i, l := range lexems {
+		if l.T == LexemAs {
+			if len(lexems) != i+2 {
+				return "", "", fmt.Errorf("unexpected select exp with AS length, expected %d, got %d", i+2, len(lexems))
+			}
+			if lexems[i+1].T != LexemIdent {
+				return "", "", fmt.Errorf("unexpected select exp with AS last lexem, expected ident, got (%d,%s)", lexems[i+1].T, lexems[i+1].V)
+			}
+			as = lexems[i+1].V
+			break
+		}
+		if sb.Len() > 0 {
+			sb.WriteString(" ")
+		}
 		switch l.T {
 		case LexemArithmeticOp, LexemLogicalOp, LexemIdent, LexemBoolLiteral, LexemNumberLiteral, LexemParenthesis:
-			sb.WriteString(fmt.Sprintf("%s ", l.V))
+			sb.WriteString(fmt.Sprintf("%s", l.V))
 		case LexemStringLiteral:
-			sb.WriteString(fmt.Sprintf("`%s` ", l.V))
+			sb.WriteString(fmt.Sprintf("`%s`", l.V))
+		case LexemNull:
+			sb.WriteString("nil")
 		case LexemComma, LexemPointedIdent, LexemSemicolon, LexemCqlOp, LexemKeyword:
-			return nil, fmt.Errorf("unexpected lexem (%d,%s)", l.T, l.V)
+			return "", "", fmt.Errorf("unexpected lexem (%d,%s)", l.T, l.V)
 		default:
-			return nil, fmt.Errorf("unknown lexem (%d,%s)", l.T, l.V)
+			return "", "", fmt.Errorf("unknown lexem (%d,%s)", l.T, l.V)
 		}
 	}
+	return sb.String(), as, nil
+}
 
-	return parser.ParseExpr(sb.String())
+func lexemsToAst(lexems []*Lexem) (ast.Expr, string, error) {
+	s, as, err := lexemsToString(lexems)
+	if err != nil {
+		return nil, "", err
+	}
+	if as == "" {
+		as = s
+	}
+	exp, err := parser.ParseExpr(s)
+	return exp, as, err
 }
 
 func parseCreateKeyspace(s string) (*CommandCreateKeyspace, string, error) {
@@ -1131,15 +1201,16 @@ func parseSelect(s string) (*CommandSelect, string, error) {
 	}
 
 	cmd.SelectExpAsts = make([]ast.Expr, len(cmd.SelectExpLexems))
+	cmd.SelectExpNames = make([]string, len(cmd.SelectExpLexems))
 	for i, selectExp := range cmd.SelectExpLexems {
-		cmd.SelectExpAsts[i], err = lexemsToAst(selectExp)
+		cmd.SelectExpAsts[i], cmd.SelectExpNames[i], err = lexemsToAst(selectExp)
 		if err != nil {
 			return nil, s, fmt.Errorf("cannot build ast from select expression: %s", err.Error())
 		}
 	}
 
 	if len(cmd.WhereExpLexems) > 0 {
-		cmd.WhereExpAst, err = lexemsToAst(cmd.WhereExpLexems)
+		cmd.WhereExpAst, _, err = lexemsToAst(cmd.WhereExpLexems)
 		if err != nil {
 			return nil, s, fmt.Errorf("cannot build ast from where expression: %s", err.Error())
 		}
@@ -1215,6 +1286,10 @@ func parseInsert(s string) (*CommandInsert, string, error) {
 			cmd.ColumnValues = append(cmd.ColumnValues, l)
 			continue
 		}
+		if l, s = getNull(s); l != nil {
+			cmd.ColumnValues = append(cmd.ColumnValues, l)
+			continue
+		}
 		if l, s = getStringLiteral(s); l != nil {
 			cmd.ColumnValues = append(cmd.ColumnValues, l)
 			continue
@@ -1241,6 +1316,12 @@ func parseInsert(s string) (*CommandInsert, string, error) {
 
 	if len(cmd.ColumnNames) != len(cmd.ColumnValues) {
 		return nil, s, fmt.Errorf("value list length (%d) should match column list length (%d)", len(cmd.ColumnValues), len(cmd.ColumnNames))
+	}
+
+	for _, colValue := range cmd.ColumnValues {
+		if colValue.T != LexemStringLiteral && colValue.T != LexemNumberLiteral && colValue.T != LexemBoolLiteral && colValue.T != LexemNull {
+			return nil, s, fmt.Errorf("insert value list can contain only number, string, bool literals, got %s", colValue.V)
+		}
 	}
 
 	return &cmd, s, nil
@@ -1299,14 +1380,14 @@ func parseUpdate(s string) (*CommandUpdate, string, error) {
 
 	cmd.ColumnSetExpAsts = make([]ast.Expr, len(cmd.ColumnSetExpressions))
 	for i, columnSetExp := range cmd.ColumnSetExpressions {
-		cmd.ColumnSetExpAsts[i], err = lexemsToAst(columnSetExp.ExpLexems)
+		cmd.ColumnSetExpAsts[i], _, err = lexemsToAst(columnSetExp.ExpLexems)
 		if err != nil {
 			return nil, s, fmt.Errorf("cannot build ast from column set expression: %s", err.Error())
 		}
 	}
 
 	if len(cmd.WhereExpLexems) > 0 {
-		cmd.WhereExpAst, err = lexemsToAst(cmd.WhereExpLexems)
+		cmd.WhereExpAst, _, err = lexemsToAst(cmd.WhereExpLexems)
 		if err != nil {
 			return nil, s, fmt.Errorf("cannot build ast from where expression: %s", err.Error())
 		}
@@ -1361,7 +1442,7 @@ func parseDelete(s string) (*CommandDelete, string, error) {
 	}
 
 	if len(cmd.WhereExpLexems) > 0 {
-		cmd.WhereExpAst, err = lexemsToAst(cmd.WhereExpLexems)
+		cmd.WhereExpAst, _, err = lexemsToAst(cmd.WhereExpLexems)
 		if err != nil {
 			return nil, s, fmt.Errorf("cannot build ast from where expression: %s", err.Error())
 		}
