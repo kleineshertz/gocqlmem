@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/capillariesio/cqlmem/eval"
+	"github.com/capillariesio/gocqlmem/eval"
 	"github.com/shopspring/decimal"
 )
 

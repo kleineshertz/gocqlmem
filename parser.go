@@ -7,6 +7,8 @@ import (
 	"go/parser"
 	"regexp"
 	"strings"
+
+	"github.com/capillariesio/gocqlmem/eval_gocqlmem"
 )
 
 type LexemType int
@@ -102,7 +104,7 @@ func (c *CommandDropKeyspace) SetCtxKeyspace(keyspace string) {
 
 type CreateTableColumnDef struct {
 	Name string
-	Type string
+	Type eval_gocqlmem.DataType
 }
 
 type ColumnSetExp struct {
@@ -652,9 +654,12 @@ func getColumnDef(s string) (*CreateTableColumnDef, string, error) {
 	l, s = getIdent(s)
 	if l != nil {
 		def.Name = l.V
-		l, s = getKeyword(s, `(?i)(BIGINT|DECIMAL|DOUBLE|TEXT|BOOLEAN|TIMESTAMP)`, true)
+		l, s = getKeyword(s, `(?i)(BIGINT|BLOB|BOOLEAN|COUNTER|DATE|DECIMAL|DOUBLE|DURATION|FLOAT|INET|INT|SMALLINT|TEXT|TIMEUUID|TIMESTAMP|TIME|TINYINT|UUID|VARCHAR|VARINT)`, true)
 		if l != nil {
-			def.Type = l.V
+			def.Type = eval_gocqlmem.StringToDataType(l.V)
+			if def.Type == eval_gocqlmem.DataTypeUnknown {
+				return nil, s, fmt.Errorf("cannot parse column def type, unsupported type %s", s)
+			}
 			return &def, s, nil
 		}
 		return nil, s, fmt.Errorf("cannot parse column def type: %s", s)
@@ -680,7 +685,7 @@ func getColumnDefList(s string) ([]*CreateTableColumnDef, string, error) {
 		var err error
 		def, s, err = getColumnDef(s)
 		if err != nil {
-			return nil, s, fmt.Errorf("cannot parse column def: %s", s)
+			return nil, s, fmt.Errorf("cannot parse column def: %s,  %s", err.Error(), s)
 		}
 		if def == nil {
 			return nil, s, fmt.Errorf("missing column def or missing PRIMARY KEY: %s", s)

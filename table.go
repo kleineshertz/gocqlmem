@@ -8,7 +8,8 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/capillariesio/cqlmem/eval"
+	"github.com/capillariesio/gocqlmem/eval"
+	"github.com/capillariesio/gocqlmem/eval_gocqlmem"
 )
 
 type PrimaryKeyType int
@@ -19,44 +20,10 @@ const (
 	PrimaryKeyNone
 )
 
-type CqlDataTypeType int
-
-const (
-	CqlDataTypeBigint CqlDataTypeType = iota
-	CqlDataTypeTinyint
-	CqlDataTypeSmallint
-	CqlDataTypeText
-	CqlDataTypeVarchar
-	CqlDataTypeDecimal
-	CqlDataTypeFloat
-	CqlDataTypeBool
-	CqlDataTypeTimestamp
-	CqlDataTypeUnknown
-)
-
-func stringToDataType(s string) (CqlDataTypeType, error) {
-	switch s {
-	case "BIGINT":
-		return CqlDataTypeBigint, nil
-	case "TEXT":
-		return CqlDataTypeText, nil
-	case "DECIMAL":
-		return CqlDataTypeDecimal, nil
-	case "FLOAT":
-		return CqlDataTypeFloat, nil
-	case "BOOLEAN":
-		return CqlDataTypeBool, nil
-	case "TIMESTAMP":
-		return CqlDataTypeTimestamp, nil
-	default:
-		return CqlDataTypeUnknown, fmt.Errorf("unsupported data type %s", s)
-	}
-}
-
 type ColumnDef struct {
 	Name            string
 	PrimaryKey      PrimaryKeyType
-	DataType        CqlDataTypeType
+	DataType        eval_gocqlmem.DataType
 	ClusteringOrder ClusteringOrderType
 }
 
@@ -68,7 +35,7 @@ type Table struct {
 	Lock         sync.RWMutex
 }
 
-func createColDef(name string, mapColType map[string]CqlDataTypeType, primaryKeyType PrimaryKeyType, mapColClusteringOrder map[string]ClusteringOrderType) (*ColumnDef, error) {
+func createColDef(name string, mapColType map[string]eval_gocqlmem.DataType, primaryKeyType PrimaryKeyType, mapColClusteringOrder map[string]ClusteringOrderType) (*ColumnDef, error) {
 	dataType, ok := mapColType[name]
 	if !ok {
 		return nil, fmt.Errorf("cannot find definition for column %s", name)
@@ -100,12 +67,10 @@ func newTable(cmd *CommandCreateTable) (*Table, error) {
 		ColumnDefMap: map[string]int{},
 	}
 
-	mapColType := map[string]CqlDataTypeType{}
+	mapColType := map[string]eval_gocqlmem.DataType{}
 	var err error
 	for _, createTableColDef := range cmd.ColumnDefs {
-		if mapColType[createTableColDef.Name], err = stringToDataType(createTableColDef.Type); err != nil {
-			return nil, err
-		}
+		mapColType[createTableColDef.Name] = createTableColDef.Type
 	}
 
 	mapColClusteringOrder := map[string]ClusteringOrderType{}
@@ -231,12 +196,12 @@ func (t *Table) getRowSequenceFromColumnDefAndSelectOrderBy(orderByFieldsFromSel
 	return result, nil
 }
 
-func convertLexemToInternalType(lexem *Lexem, cqlType CqlDataTypeType) (any, error) {
+func convertLexemToInternalType(lexem *Lexem, cqlType eval_gocqlmem.DataType) (any, error) {
 	if lexem.T == LexemNull {
 		return nil, nil
 	}
 	switch cqlType {
-	case CqlDataTypeBigint, CqlDataTypeTinyint, CqlDataTypeSmallint:
+	case eval_gocqlmem.DataTypeBigint, eval_gocqlmem.DataTypeTinyint, eval_gocqlmem.DataTypeSmallint:
 		if lexem.T != LexemNumberLiteral {
 			return 0, fmt.Errorf("cannot convert %v to integer, lexem type %d not supported", lexem.V, lexem.T)
 		}
@@ -246,72 +211,18 @@ func convertLexemToInternalType(lexem *Lexem, cqlType CqlDataTypeType) (any, err
 		}
 		return int64(val), nil
 
-	case CqlDataTypeText, CqlDataTypeVarchar:
+	case eval_gocqlmem.DataTypeText, eval_gocqlmem.DataTypeVarchar:
 		if lexem.T != LexemStringLiteral {
 			return 0, fmt.Errorf("cannot convert %v to string, lexem type %d not supported", lexem.V, lexem.T)
 		}
 		return lexem.V, nil
 
-	case CqlDataTypeBool:
+	case eval_gocqlmem.DataTypeBoolean:
 		if lexem.T != LexemBoolLiteral {
 			return 0, fmt.Errorf("cannot convert %v to bool, lexem type %d not supported", lexem.V, lexem.T)
 		}
 		return lexem.V == "TRUE", nil
 
-	default:
-		return 0, fmt.Errorf("unknown column type %v", cqlType)
-	}
-}
-
-func castToInternalType(val any, cqlType CqlDataTypeType) (any, error) {
-	switch cqlType {
-	case CqlDataTypeBigint, CqlDataTypeTinyint, CqlDataTypeSmallint:
-		typedVal, ok := any(val).(int64)
-		if !ok {
-			return 0, fmt.Errorf("cast %v to int64 failed", val)
-		}
-		return typedVal, nil
-
-	case CqlDataTypeText, CqlDataTypeVarchar:
-		typedVal, ok := any(val).(string)
-		if !ok {
-			return 0, fmt.Errorf("cast %v to string failed", val)
-		}
-		return typedVal, nil
-
-	default:
-		return 0, fmt.Errorf("unknown column type %v", cqlType)
-	}
-}
-
-func compareInternalType(left any, right any, cqlType CqlDataTypeType) (int, error) {
-	if left == nil {
-		return 0, fmt.Errorf("left is nil, not allowed in partition/clustering key comparison, dev error")
-	}
-	if right == nil {
-		return 0, fmt.Errorf("right is nil, not allowed in partition/clustering key comparison, dev error")
-	}
-	switch cqlType {
-	case CqlDataTypeBigint, CqlDataTypeTinyint, CqlDataTypeSmallint:
-		typedLeft, okLeft := any(left).(int64)
-		if !okLeft {
-			return 0, fmt.Errorf("left cast %v to int64 failed", left)
-		}
-		typedRight, okRight := any(right).(int64)
-		if !okRight {
-			return 0, fmt.Errorf("right cast %v to int64 failed", right)
-		}
-		return cmp.Compare(typedLeft, typedRight), nil
-	case CqlDataTypeText, CqlDataTypeVarchar:
-		typedLeft, okLeft := any(left).(string)
-		if !okLeft {
-			return 0, fmt.Errorf("left cast %v to string failed", left)
-		}
-		typedRight, okRight := any(right).(string)
-		if !okRight {
-			return 0, fmt.Errorf("right cast %v to string failed", right)
-		}
-		return cmp.Compare(typedLeft, typedRight), nil
 	default:
 		return 0, fmt.Errorf("unknown column type %v", cqlType)
 	}
@@ -328,7 +239,7 @@ func getRowIndexFromColumnDefAndInsert(columnValues [][]any, columnDefs []*Colum
 		curIdx := topIdx
 		for curIdx < bottomIdx {
 			curVal := columnValues[tableColIdx][curIdx]
-			compareResult, err := compareInternalType(curVal, insertedColVal, tableColDef.DataType)
+			compareResult, err := eval_gocqlmem.CompareInternalType(curVal, insertedColVal, tableColDef.DataType)
 			if err != nil {
 				return 0, false, fmt.Errorf("cannot compare existing %v to inserted %v", curVal, insertedColVal)
 			}
@@ -473,7 +384,7 @@ func (t *Table) execSelect(cmd *CommandSelect) ([]string, [][]any, error) {
 			valMap[""][colDef.Name] = t.ColumnValues[colIdx][i]
 		}
 
-		eCtx := eval.NewPlainEvalCtx(nil, nil, valMap)
+		eCtx := eval.NewPlainEvalCtx(eval_gocqlmem.GocqlmemEvalFunctions, eval_gocqlmem.GocqlmemEvalConstants, valMap)
 		isIncludeAny, err := eCtx.Eval(cmd.WhereExpAst)
 		if err != nil {
 			return nil, nil, err
@@ -486,7 +397,7 @@ func (t *Table) execSelect(cmd *CommandSelect) ([]string, [][]any, error) {
 
 		if isInclude {
 			for _, selectExpAst := range cmd.SelectExpAsts {
-				eCtx := eval.NewPlainEvalCtx(nil, nil, valMap)
+				eCtx := eval.NewPlainEvalCtx(eval_gocqlmem.GocqlmemEvalFunctions, eval_gocqlmem.GocqlmemEvalConstants, valMap)
 				val, err := eCtx.Eval(selectExpAst)
 				if err != nil {
 					return nil, nil, err

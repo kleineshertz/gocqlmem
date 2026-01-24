@@ -1,4 +1,4 @@
-module github.com/capillariesio/cqlmem
+module github.com/capillariesio/gocqlmem
 
 go 1.25
 

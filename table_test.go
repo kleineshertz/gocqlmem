@@ -3,15 +3,16 @@ package gocqlmem
 import (
 	"testing"
 
+	"github.com/capillariesio/gocqlmem/eval_gocqlmem"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestTableSelectOrderBy(t *testing.T) {
 	table := Table{
 		ColumnDefs: []*ColumnDef{
-			{"col1", PrimaryKeyPartition, CqlDataTypeText, ClusteringOrderAsc},
-			{"col2", PrimaryKeyClustering, CqlDataTypeBigint, ClusteringOrderDesc},
-			{"col3", PrimaryKeyNone, CqlDataTypeBool, ClusteringOrderNone},
+			{"col1", PrimaryKeyPartition, eval_gocqlmem.DataTypeText, ClusteringOrderAsc},
+			{"col2", PrimaryKeyClustering, eval_gocqlmem.DataTypeBigint, ClusteringOrderDesc},
+			{"col3", PrimaryKeyNone, eval_gocqlmem.DataTypeBoolean, ClusteringOrderNone},
 		},
 		ColumnValues: [][]any{
 			{"a", "a", "b", "c"},
@@ -82,9 +83,9 @@ func TestRowIndexFromColumnDefAndInsert(t *testing.T) {
 	// ASC ASC
 
 	columnDefs = []*ColumnDef{
-		{"col1", PrimaryKeyPartition, CqlDataTypeText, ClusteringOrderAsc},
-		{"col2", PrimaryKeyClustering, CqlDataTypeBigint, ClusteringOrderAsc},
-		{"col3", PrimaryKeyNone, CqlDataTypeBool, ClusteringOrderNone},
+		{"col1", PrimaryKeyPartition, eval_gocqlmem.DataTypeText, ClusteringOrderAsc},
+		{"col2", PrimaryKeyClustering, eval_gocqlmem.DataTypeBigint, ClusteringOrderAsc},
+		{"col3", PrimaryKeyNone, eval_gocqlmem.DataTypeBoolean, ClusteringOrderNone},
 	}
 	columnValues = [][]any{
 		{"a", "a", "c", "d"},
@@ -134,9 +135,9 @@ func TestRowIndexFromColumnDefAndInsert(t *testing.T) {
 	// ASC DESC
 
 	columnDefs = []*ColumnDef{
-		{"col1", PrimaryKeyPartition, CqlDataTypeText, ClusteringOrderAsc},
-		{"col2", PrimaryKeyClustering, CqlDataTypeBigint, ClusteringOrderDesc},
-		{"col3", PrimaryKeyNone, CqlDataTypeBool, ClusteringOrderNone},
+		{"col1", PrimaryKeyPartition, eval_gocqlmem.DataTypeText, ClusteringOrderAsc},
+		{"col2", PrimaryKeyClustering, eval_gocqlmem.DataTypeBigint, ClusteringOrderDesc},
+		{"col3", PrimaryKeyNone, eval_gocqlmem.DataTypeBoolean, ClusteringOrderNone},
 	}
 	columnValues = [][]any{
 		{"a", "a", "c", "d"},
@@ -186,9 +187,9 @@ func TestRowIndexFromColumnDefAndInsert(t *testing.T) {
 	// ASC DESC empty
 
 	columnDefs = []*ColumnDef{
-		{"col1", PrimaryKeyPartition, CqlDataTypeText, ClusteringOrderAsc},
-		{"col2", PrimaryKeyClustering, CqlDataTypeBigint, ClusteringOrderDesc},
-		{"col3", PrimaryKeyNone, CqlDataTypeBool, ClusteringOrderNone},
+		{"col1", PrimaryKeyPartition, eval_gocqlmem.DataTypeText, ClusteringOrderAsc},
+		{"col2", PrimaryKeyClustering, eval_gocqlmem.DataTypeBigint, ClusteringOrderDesc},
+		{"col3", PrimaryKeyNone, eval_gocqlmem.DataTypeBoolean, ClusteringOrderNone},
 	}
 	columnValues = [][]any{
 		{},
@@ -207,9 +208,9 @@ func TestRowIndexFromColumnDefAndInsert(t *testing.T) {
 func TestTableInsert(t *testing.T) {
 	table := Table{
 		ColumnDefs: []*ColumnDef{
-			{"col1", PrimaryKeyPartition, CqlDataTypeText, ClusteringOrderAsc},
-			{"col2", PrimaryKeyClustering, CqlDataTypeBigint, ClusteringOrderDesc},
-			{"col3", PrimaryKeyNone, CqlDataTypeBool, ClusteringOrderNone},
+			{"col1", PrimaryKeyPartition, eval_gocqlmem.DataTypeText, ClusteringOrderAsc},
+			{"col2", PrimaryKeyClustering, eval_gocqlmem.DataTypeBigint, ClusteringOrderDesc},
+			{"col3", PrimaryKeyNone, eval_gocqlmem.DataTypeBoolean, ClusteringOrderNone},
 		},
 		ColumnValues: [][]any{[]any{}, []any{}, []any{}},
 		ColumnDefMap: map[string]int{"col1": 0, "col2": 1, "col3": 2},
@@ -279,8 +280,8 @@ func TestTableInsert(t *testing.T) {
 func TestTableSelect(t *testing.T) {
 	table := Table{
 		ColumnDefs: []*ColumnDef{
-			{"col1", PrimaryKeyPartition, CqlDataTypeText, ClusteringOrderAsc},
-			{"col2", PrimaryKeyClustering, CqlDataTypeBigint, ClusteringOrderDesc},
+			{"col1", PrimaryKeyPartition, eval_gocqlmem.DataTypeText, ClusteringOrderAsc},
+			{"col2", PrimaryKeyClustering, eval_gocqlmem.DataTypeBigint, ClusteringOrderDesc},
 		},
 		ColumnValues: [][]any{
 			{"a", "a", "c", "d"},
