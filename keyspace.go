@@ -89,7 +89,7 @@ func (ks *Keyspace) execUpdate(cmd *CommandUpdate) (bool, error) {
 		return false, fmt.Errorf("cannot update table %s, it was not found in the keyspace %s", cmd.TableName, cmd.GetCtxKeyspace())
 	}
 
-	return t.update(cmd)
+	return t.execUpdate(cmd)
 }
 
 func (ks *Keyspace) execDelete(cmd *CommandDelete) (bool, error) {

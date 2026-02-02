@@ -241,7 +241,7 @@ func getAs(s string) (*Lexem, string) {
 	r := regexp.MustCompile(`^(?i)AS`)
 	litRange := r.FindStringIndex(s)
 	if len(litRange) >= 2 {
-		return &Lexem{LexemAs, s[0:litRange[1]]}, s[litRange[1]:]
+		return &Lexem{LexemAs, strings.ToUpper(s[0:litRange[1]])}, s[litRange[1]:]
 	}
 	return nil, s
 }
@@ -359,6 +359,7 @@ func getComma(s string) (*Lexem, string) {
 	}
 	return nil, s
 }
+
 func getSemicolon(s string) (*Lexem, string) {
 	s = skipBlank(s)
 	r := regexp.MustCompile(`^;`)
@@ -410,11 +411,15 @@ func getSelectExpression(s string) ([]*Lexem, string) {
 			exp = append(exp, l)
 			continue
 		}
+		if l, s = getAs(s); l != nil {
+			exp = append(exp, l)
+			continue
+		}
 		if l, s = getParenthesis(s); l != nil {
 			exp = append(exp, l)
 			continue
 		}
-		if l, s = getIdent(s); l != nil {
+		if l, s = getIdentOrPointedIdent(s); l != nil {
 			exp = append(exp, l)
 			continue
 		}
@@ -437,6 +442,7 @@ func getSelectExpressions(s string) ([][]*Lexem, string) {
 			break
 		}
 		convertLogicalOpLexemsForAstParser(exp)
+		exp = convertCastForAstParser(exp)
 		exps = append(exps, exp)
 	}
 
@@ -519,6 +525,34 @@ func convertInNotInLexemsForAstParser(lexems []*Lexem) ([]*Lexem, error) {
 	return lexems, nil
 }
 
+// Returns index of the AS in CAST(... AS <type>)
+func findCastAsLexem(lexems []*Lexem) int {
+	// Well, this is a leap of faith
+	for i := range len(lexems) {
+		if lexems[i].T == LexemAs && i >= 3 && eval_gocqlmem.IsValidDataType(strings.ToLower(lexems[i+1].V)) && lexems[i+2].V == ")" {
+			return i
+		}
+	}
+	// No candidates found, give up
+	return -1
+}
+
+// Replace "AS" with a comma to make ast parser happy
+func convertCastForAstParser(lexems []*Lexem) []*Lexem {
+	for {
+		asIdx := findCastAsLexem(lexems)
+		if asIdx == -1 {
+			break
+		}
+		newLexems := make([]*Lexem, 0)
+		newLexems = append(newLexems, lexems[0:asIdx]...)
+		newLexems = append(newLexems, &Lexem{LexemComma, ","})
+		newLexems = append(newLexems, lexems[asIdx+1:]...)
+		lexems = newLexems
+	}
+	return lexems
+}
+
 func getWhereExpression(s string) ([]*Lexem, string, error) {
 	var l *Lexem
 	exp := make([]*Lexem, 0)
@@ -562,6 +596,10 @@ func getWhereExpression(s string) ([]*Lexem, string, error) {
 			exp = append(exp, l)
 			continue
 		}
+		if l, s = getAs(s); l != nil {
+			exp = append(exp, l)
+			continue
+		}
 		if l, s = getParenthesis(s); l != nil {
 			exp = append(exp, l)
 			continue
@@ -570,7 +608,7 @@ func getWhereExpression(s string) ([]*Lexem, string, error) {
 			exp = append(exp, l)
 			continue
 		}
-		if l, s = getIdent(s); l != nil {
+		if l, s = getIdentOrPointedIdent(s); l != nil {
 			exp = append(exp, l)
 			continue
 		}
@@ -578,11 +616,13 @@ func getWhereExpression(s string) ([]*Lexem, string, error) {
 	}
 
 	convertLogicalOpLexemsForAstParser(exp)
+	exp = convertCastForAstParser(exp)
 
 	var err error
 	if exp, err = convertInNotInLexemsForAstParser(exp); err != nil {
 		return nil, s, fmt.Errorf("cannot convert IN/NOT IN expression: %s", err.Error())
 	}
+
 	return exp, s, nil
 }
 
@@ -790,6 +830,7 @@ func getColumnSetExpressionLexems(s string) ([]*Lexem, string) {
 			lexems = append(lexems, l)
 			continue
 		}
+		// No poited idents allowed here? I guess so.
 		if l, s = getIdent(s); l != nil {
 			lexems = append(lexems, l)
 			continue
@@ -824,6 +865,7 @@ func getColumnSetExpressions(s string) ([]*ColumnSetExp, string, error) {
 		}
 		exp.ExpLexems, s = getColumnSetExpressionLexems(s)
 		convertLogicalOpLexemsForAstParser(exp.ExpLexems)
+		exp.ExpLexems = convertCastForAstParser(exp.ExpLexems)
 		columnsSetExpList = append(columnsSetExpList, &exp)
 	}
 	return columnsSetExpList, s, nil
@@ -833,6 +875,7 @@ func lexemsToString(lexems []*Lexem) (string, string, error) {
 	sb := strings.Builder{}
 	var as string
 	for i, l := range lexems {
+		// This handles SELECT expr AS synt_field_name
 		if l.T == LexemAs {
 			if len(lexems) != i+2 {
 				return "", "", fmt.Errorf("unexpected select exp with AS length, expected %d, got %d", i+2, len(lexems))
@@ -847,13 +890,19 @@ func lexemsToString(lexems []*Lexem) (string, string, error) {
 			sb.WriteString(" ")
 		}
 		switch l.T {
-		case LexemArithmeticOp, LexemLogicalOp, LexemIdent, LexemBoolLiteral, LexemNumberLiteral, LexemParenthesis:
+		case LexemComma, LexemArithmeticOp, LexemLogicalOp, LexemBoolLiteral, LexemNumberLiteral, LexemParenthesis:
 			sb.WriteString(fmt.Sprintf("%s", l.V))
+		case LexemIdent, LexemPointedIdent:
+			if eval_gocqlmem.IsValidDataType(l.V) {
+				sb.WriteString(fmt.Sprintf("%s", strings.ToUpper(l.V)))
+			} else {
+				sb.WriteString(fmt.Sprintf("%s", l.V))
+			}
 		case LexemStringLiteral:
 			sb.WriteString(fmt.Sprintf("`%s`", l.V))
 		case LexemNull:
 			sb.WriteString("nil")
-		case LexemComma, LexemPointedIdent, LexemSemicolon, LexemCqlOp, LexemKeyword:
+		case LexemSemicolon, LexemCqlOp, LexemKeyword:
 			return "", "", fmt.Errorf("unexpected lexem (%d,%s)", l.T, l.V)
 		default:
 			return "", "", fmt.Errorf("unknown lexem (%d,%s)", l.T, l.V)

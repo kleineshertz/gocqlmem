@@ -273,7 +273,7 @@ func TestTableInsert(t *testing.T) {
 
 	cmd.IfNotExists = false
 	isApplied, err = table.execInsert(&cmd)
-	assert.Contains(t, err.Error(), "cannot insert duplicate map[col1:b col2:0 col3:true]")
+	assert.Contains(t, err.Error(), "cannot upsert duplicate map[col1:b col2:0 col3:true]")
 	assert.False(t, isApplied)
 }
 
@@ -290,7 +290,7 @@ func TestTableSelect(t *testing.T) {
 		ColumnDefMap: map[string]int{"col1": 0, "col2": 1, "col3": 2},
 	}
 
-	cmds, err := ParseCommands(`SELECT col1+'a' AS c1, col2*5 as c2 FROM ks1.t WHERE col1 = 'a'`)
+	cmds, err := ParseCommands(`SELECT t.col1+'a' AS c1, cast(col2*5 as text) as c2 FROM ks1.t WHERE t.col1 = 'a'`)
 	assert.Nil(t, err)
 	cmd, ok := cmds[0].(*CommandSelect)
 	assert.True(t, ok)
@@ -304,7 +304,88 @@ func TestTableSelect(t *testing.T) {
 	assert.Equal(t, 2, len(values))
 
 	assert.Equal(t, "aa", values[0][0])
-	assert.Equal(t, int64(0), values[0][1])
+	assert.Equal(t, "0", values[0][1])
 	assert.Equal(t, "aa", values[1][0])
-	assert.Equal(t, int64(5), values[1][1])
+	assert.Equal(t, "5", values[1][1])
+}
+
+func TestTableUpdate(t *testing.T) {
+	table := Table{
+		ColumnDefs: []*ColumnDef{
+			{"col1", PrimaryKeyPartition, eval_gocqlmem.DataTypeText, ClusteringOrderAsc},
+			{"col2", PrimaryKeyClustering, eval_gocqlmem.DataTypeBigint, ClusteringOrderDesc},
+			{"col3", PrimaryKeyNone, eval_gocqlmem.DataTypeBigint, ClusteringOrderNone},
+		},
+		ColumnValues: [][]any{
+			{"a", "a", "c", "d"},
+			{int64(0), int64(1), int64(3), int64(3)},
+			{int64(100), int64(101), int64(103), int64(103)},
+		},
+		ColumnDefMap: map[string]int{"col1": 0, "col2": 1, "col3": 2},
+	}
+
+	var cmds []Command
+	var cmd *CommandUpdate
+	var isApplied bool
+	var err error
+	var ok bool
+
+	cmds, err = ParseCommands(`UPDATE ks1.t SET col3=1001 WHERE t.col1 = 'a'`)
+	assert.Nil(t, err)
+	cmd, ok = cmds[0].(*CommandUpdate)
+	assert.True(t, ok)
+
+	isApplied, err = table.execUpdate(cmd)
+	assert.Nil(t, err)
+
+	assert.True(t, isApplied)
+
+	assert.Equal(t, "a", table.ColumnValues[0][0])
+	assert.Equal(t, int64(0), table.ColumnValues[1][0])
+	assert.Equal(t, int64(1001), table.ColumnValues[2][0])
+
+	assert.Equal(t, "a", table.ColumnValues[0][1])
+	assert.Equal(t, int64(1), table.ColumnValues[1][1])
+	assert.Equal(t, int64(1001), table.ColumnValues[2][1])
+
+	assert.Equal(t, "c", table.ColumnValues[0][2])
+	assert.Equal(t, int64(3), table.ColumnValues[1][2])
+	assert.Equal(t, int64(103), table.ColumnValues[2][2])
+
+	assert.Equal(t, "d", table.ColumnValues[0][3])
+	assert.Equal(t, int64(3), table.ColumnValues[1][3])
+	assert.Equal(t, int64(103), table.ColumnValues[2][3])
+
+	// UPSERT
+	cmds, err = ParseCommands(`UPDATE ks1.t SET col3=1002 WHERE col1 = 'a' and t.col2 = 100`)
+	assert.Nil(t, err)
+	cmd, ok = cmds[0].(*CommandUpdate)
+	assert.True(t, ok)
+
+	isApplied, err = table.execUpdate(cmd)
+	assert.Nil(t, err)
+
+	assert.True(t, isApplied)
+
+	// Upserted
+	assert.Equal(t, "a", table.ColumnValues[0][0])
+	assert.Equal(t, int64(100), table.ColumnValues[1][0])
+	assert.Equal(t, int64(1002), table.ColumnValues[2][0])
+
+	// Old
+	assert.Equal(t, "a", table.ColumnValues[0][1])
+	assert.Equal(t, int64(0), table.ColumnValues[1][1])
+	assert.Equal(t, int64(1001), table.ColumnValues[2][1])
+
+	assert.Equal(t, "a", table.ColumnValues[0][2])
+	assert.Equal(t, int64(1), table.ColumnValues[1][2])
+	assert.Equal(t, int64(1001), table.ColumnValues[2][2])
+
+	assert.Equal(t, "c", table.ColumnValues[0][3])
+	assert.Equal(t, int64(3), table.ColumnValues[1][3])
+	assert.Equal(t, int64(103), table.ColumnValues[2][3])
+
+	assert.Equal(t, "d", table.ColumnValues[0][4])
+	assert.Equal(t, int64(3), table.ColumnValues[1][4])
+	assert.Equal(t, int64(103), table.ColumnValues[2][4])
 }

@@ -3,6 +3,8 @@ package gocqlmem
 import (
 	"cmp"
 	"fmt"
+	"go/ast"
+	"go/token"
 	"math"
 	"slices"
 	"strconv"
@@ -286,10 +288,7 @@ func getRowIndexFromColumnDefAndInsert(columnValues [][]any, columnDefs []*Colum
 	return bottomIdx, isExists, nil
 }
 
-func (t *Table) execInsert(cmd *CommandInsert) (bool, error) {
-	t.Lock.Lock()
-	defer t.Lock.Unlock()
-
+func (t *Table) execInternalUpsert(cmd *CommandInsert, insertedColumnValues map[string]any) (bool, error) {
 	for _, tableColDef := range t.ColumnDefs {
 		if tableColDef.PrimaryKey == PrimaryKeyPartition || tableColDef.PrimaryKey == PrimaryKeyClustering {
 			var isPresent bool
@@ -300,30 +299,19 @@ func (t *Table) execInsert(cmd *CommandInsert) (bool, error) {
 				}
 			}
 			if !isPresent {
-				return false, fmt.Errorf("partition/clustering column key %s must be specified in the insert command", tableColDef.Name)
+				return false, fmt.Errorf("partition/clustering column key %s must be specified in the upsert command", tableColDef.Name)
 			}
 		}
 	}
 
 	var err error
-	insertedColumnValues := map[string]any{}
-	for i, name := range cmd.ColumnNames {
-		insertedColumnValues[name], err = convertLexemToInternalType(cmd.ColumnValues[i], t.ColumnDefs[t.ColumnDefMap[name]].DataType)
-		if err != nil {
-			return false, fmt.Errorf("cannot cast inserted column %d: %s", i, err.Error())
-		}
-		if insertedColumnValues[name] == nil && (t.ColumnDefs[t.ColumnDefMap[name]].PrimaryKey == PrimaryKeyPartition || t.ColumnDefs[t.ColumnDefMap[name]].PrimaryKey == PrimaryKeyClustering) {
-			return false, fmt.Errorf("cannot insert NULL into a partition/clustered key column %s", name)
-		}
-	}
-
 	var insertIdx int
 	var isAlreadyExists bool
 
 	if len(t.ColumnValues[0]) > 0 {
 		insertIdx, isAlreadyExists, err = getRowIndexFromColumnDefAndInsert(t.ColumnValues, t.ColumnDefs, insertedColumnValues)
 		if err != nil {
-			return false, fmt.Errorf("cannot find insert idx for %v: %s", insertedColumnValues, err.Error())
+			return false, fmt.Errorf("cannot find upsert idx for %v: %s", insertedColumnValues, err.Error())
 		}
 
 		if isAlreadyExists && cmd.IfNotExists {
@@ -331,7 +319,7 @@ func (t *Table) execInsert(cmd *CommandInsert) (bool, error) {
 		}
 
 		if isAlreadyExists && !cmd.IfNotExists {
-			return false, fmt.Errorf("cannot insert duplicate %v", insertedColumnValues)
+			return false, fmt.Errorf("cannot upsert duplicate %v", insertedColumnValues)
 		}
 
 		for tableColIdx, tableColDef := range t.ColumnDefs {
@@ -350,8 +338,26 @@ func (t *Table) execInsert(cmd *CommandInsert) (bool, error) {
 			t.ColumnValues[tableColIdx] = append(t.ColumnValues[tableColIdx], val)
 		}
 	}
-
 	return true, nil
+}
+
+func (t *Table) execInsert(cmd *CommandInsert) (bool, error) {
+	t.Lock.Lock()
+	defer t.Lock.Unlock()
+
+	var err error
+	insertedColumnValues := map[string]any{}
+	for i, name := range cmd.ColumnNames {
+		insertedColumnValues[name], err = convertLexemToInternalType(cmd.ColumnValues[i], t.ColumnDefs[t.ColumnDefMap[name]].DataType)
+		if err != nil {
+			return false, fmt.Errorf("cannot cast upserted column %d: %s", i, err.Error())
+		}
+		if insertedColumnValues[name] == nil && (t.ColumnDefs[t.ColumnDefMap[name]].PrimaryKey == PrimaryKeyPartition || t.ColumnDefs[t.ColumnDefMap[name]].PrimaryKey == PrimaryKeyClustering) {
+			return false, fmt.Errorf("cannot upsert NULL into a partition/clustered key column %s", name)
+		}
+	}
+
+	return t.execInternalUpsert(cmd, insertedColumnValues)
 }
 
 func (t *Table) execSelect(cmd *CommandSelect) ([]string, [][]any, error) {
@@ -378,10 +384,12 @@ func (t *Table) execSelect(cmd *CommandSelect) ([]string, [][]any, error) {
 	resultRows := [][]any{}
 	valMap := eval.VarValuesMap{}
 	valMap[""] = map[string]any{}
+	valMap[cmd.TableName] = map[string]any{}
 	for _, i := range selectSeq {
 		resultRow := []any{}
 		for colIdx, colDef := range t.ColumnDefs {
 			valMap[""][colDef.Name] = t.ColumnValues[colIdx][i]
+			valMap[cmd.TableName][colDef.Name] = t.ColumnValues[colIdx][i]
 		}
 
 		eCtx := eval.NewPlainEvalCtx(eval_gocqlmem.GocqlmemEvalFunctions, eval_gocqlmem.GocqlmemEvalConstants, valMap)
@@ -411,13 +419,213 @@ func (t *Table) execSelect(cmd *CommandSelect) ([]string, [][]any, error) {
 	return resultNames, resultRows, nil
 }
 
-func (t *Table) update(cmd *CommandUpdate) (bool, error) {
+func getInsertedPriKeyColumnNameFromEql(tableName string, columnDefMap map[string]int, exp ast.Expr) (string, error) {
+	switch typedExp := exp.(type) {
+	case *ast.Ident:
+		if _, ok := columnDefMap[typedExp.Name]; ok {
+			return typedExp.Name, nil
+		}
+		// It's an ident, but not a column name, maybe it's a still valid right-side ident like col1 == TRUE
+		return "", nil
+
+	case *ast.SelectorExpr:
+		switch tableIdent := typedExp.X.(type) {
+		case *ast.Ident:
+			if tableIdent.Name != tableName {
+				// It's a selector ident, but not a column in this table, maybe it's a still valid right-side ident like col1 == some_namespace.some_selector
+				return "", nil
+			}
+			return typedExp.Sel.Name, nil
+		default:
+			return "", fmt.Errorf("expected %s.col_name == ..., got invalid table name of type %T", tableName, tableIdent)
+		}
+	default:
+		// It's a generic expression, maybe it's a still valid right-side ident like col1 == some_func(a*b)
+		return "", nil
+	}
+}
+
+func getInsertedPriKeyColumnValuePairFromEql(tableName string, columnDefs []*ColumnDef, columnDefMap map[string]int, eqlExp ast.BinaryExpr) (string, any, error) {
+	var colName string
+	var err error
+	var colValExp ast.Expr
+
+	// Try left side for column name
+	colName, err = getInsertedPriKeyColumnNameFromEql(tableName, columnDefMap, eqlExp.X)
+	if err != nil {
+		return "", nil, err
+	}
+	if colName != "" {
+		colValExp = eqlExp.Y
+	} else {
+		// Try right side for column name
+		colName, err = getInsertedPriKeyColumnNameFromEql(tableName, columnDefMap, eqlExp.Y)
+		if err != nil {
+			return "", nil, err
+		}
+		if colName != "" {
+			colValExp = eqlExp.X
+		} else {
+			return "", nil, fmt.Errorf("cannot find column ident in the expected col1 == ... , got %T == %T", eqlExp.X, eqlExp.Y)
+		}
+	}
+
+	// Column value exp can be something like round(2.3), it does not have to be a literal
+	eCtx := eval.NewPlainEvalCtx(eval_gocqlmem.GocqlmemEvalFunctions, eval_gocqlmem.GocqlmemEvalConstants, nil)
+	colValAny, err := eCtx.Eval(colValExp)
+	if err != nil {
+		return "", nil, fmt.Errorf("cannot evaluate column %s value: %s", colName, err.Error())
+	}
+
+	if colValAny == nil {
+		return colName, nil, nil
+	}
+
+	internalColVal, err := eval_gocqlmem.CastToInternalType(colValAny, columnDefs[columnDefMap[colName]].DataType)
+	if err != nil {
+		return "", nil, fmt.Errorf("cannot cast column %s value (%v): %s", colName, colValAny, err.Error())
+	}
+
+	return colName, internalColVal, nil
+}
+
+func harvestInsertedPriKeyValuesFromAstExp(tableName string, columnDefs []*ColumnDef, columnDefMap map[string]int, exp ast.Expr, colValueMap map[string]any) error {
+	switch typedExp := exp.(type) {
+	case *ast.BinaryExpr:
+		switch typedExp.Op {
+		case token.LAND:
+			if err := harvestInsertedPriKeyValuesFromAstExp(tableName, columnDefs, columnDefMap, typedExp.X, colValueMap); err != nil {
+				return fmt.Errorf("error harvesting left side of AND: %s", err.Error())
+			}
+			if err := harvestInsertedPriKeyValuesFromAstExp(tableName, columnDefs, columnDefMap, typedExp.Y, colValueMap); err != nil {
+				return fmt.Errorf("error harvesting right side of AND: %s", err.Error())
+			}
+		case token.EQL:
+			colName, colVal, err := getInsertedPriKeyColumnValuePairFromEql(tableName, columnDefs, columnDefMap, *typedExp)
+			if err != nil {
+				return fmt.Errorf("cannot get column name value pair: %s", err.Error())
+			}
+			colValueMap[colName] = colVal
+		default:
+			return fmt.Errorf("cannot harvest, expected top-level AND or ==, got op %d", typedExp.Op)
+		}
+	default:
+		return fmt.Errorf("cannot harvest, expected top-level AND or ==, got exp %T", typedExp)
+	}
+	return nil
+}
+
+// Convert "WHERE col1 == 'a' and col2 == 100` into col1:'a',col2:100
+func getInsertedPriKeyValuesFromWhereClause(tableName string, columnDefs []*ColumnDef, columnDefMap map[string]int, whereExpAst ast.Expr) (map[string]any, error) {
+	// 1. Detect all colX = exp fragments
+	// 2. Ensure they are linked with AND
+	// 3. Ensure the combined col1==... AND COL2==... is at the top of ast
+	// 4. For each colX==... evaluate the exp and add it to the result map
+	colValueMap := map[string]any{}
+	if err := harvestInsertedPriKeyValuesFromAstExp(tableName, columnDefs, columnDefMap, whereExpAst, colValueMap); err != nil {
+		return nil, fmt.Errorf("cannot obtain primary key values from WHERE expression: %s", err.Error())
+	}
+	return colValueMap, nil
+}
+
+func (t *Table) execUpdate(cmd *CommandUpdate) (bool, error) {
 	t.Lock.Lock()
 	defer t.Lock.Unlock()
 
-	// TODO: update
+	for _, tableColDef := range t.ColumnDefs {
+		if tableColDef.PrimaryKey == PrimaryKeyPartition || tableColDef.PrimaryKey == PrimaryKeyClustering {
+			for _, colSetExp := range cmd.ColumnSetExpressions {
+				if colSetExp.Name == tableColDef.Name {
+					return false, fmt.Errorf("partition/clustering column key %s cannot be modified in the update command", tableColDef.Name)
+				}
+			}
+		}
+	}
 
-	return false, nil
+	var err error
+	updatedNonKeyColValues := map[string]any{}
+	for i, colSetExp := range cmd.ColumnSetExpressions {
+		eCtx := eval.NewPlainEvalCtx(eval_gocqlmem.GocqlmemEvalFunctions, eval_gocqlmem.GocqlmemEvalConstants, nil)
+		updatedNonKeyColValues[colSetExp.Name], err = eCtx.Eval(cmd.ColumnSetExpAsts[i])
+		if err != nil {
+			return false, fmt.Errorf("cannot calculate updated column %d: %s", i, err.Error())
+		}
+		updatedNonKeyColValues[colSetExp.Name], err = eval_gocqlmem.CastToInternalType(updatedNonKeyColValues[colSetExp.Name], t.ColumnDefs[t.ColumnDefMap[colSetExp.Name]].DataType)
+		if err != nil {
+			return false, fmt.Errorf("cannot cast updated column %d: %s", i, err.Error())
+		}
+	}
+
+	valMap := eval.VarValuesMap{}
+	valMap[""] = map[string]any{}
+	valMap[cmd.TableName] = map[string]any{}
+	var isAlreadyExists bool
+	for i := range len(t.ColumnValues[0]) {
+		clear(valMap[""])
+		for colIdx, colDef := range t.ColumnDefs {
+			valMap[""][colDef.Name] = t.ColumnValues[colIdx][i]
+			valMap[cmd.TableName][colDef.Name] = t.ColumnValues[colIdx][i]
+		}
+
+		eCtx := eval.NewPlainEvalCtx(eval_gocqlmem.GocqlmemEvalFunctions, eval_gocqlmem.GocqlmemEvalConstants, valMap)
+		isUpdateAny, err := eCtx.Eval(cmd.WhereExpAst)
+		if err != nil {
+			return false, err
+		}
+
+		isUpdate, ok := isUpdateAny.(bool)
+		if !ok {
+			return false, fmt.Errorf("where expressions return %T, expected bool", isUpdateAny)
+		}
+
+		if isUpdate {
+			isAlreadyExists = true
+			for _, colSetExp := range cmd.ColumnSetExpressions {
+				colDefIdx, ok := t.ColumnDefMap[colSetExp.Name]
+				if !ok {
+					return false, fmt.Errorf("cannot update column %s, it is not in the table definition", colSetExp.Name)
+				}
+				t.ColumnValues[colDefIdx][i] = updatedNonKeyColValues[colSetExp.Name]
+			}
+		}
+	}
+
+	if isAlreadyExists {
+		return true, nil
+	}
+
+	if cmd.IfExists {
+		return false, nil
+	}
+
+	// UPSERT
+
+	insertCmd := CommandInsert{
+		CtxKeyspace:  cmd.CtxKeyspace,
+		TableName:    cmd.TableName,
+		ColumnNames:  make([]string, 0),
+		ColumnValues: make([]*Lexem, 0),
+		IfNotExists:  false, // We know it does not exist, this is why update became upsert
+	}
+
+	// Primary key columns must be set, we have to convert "WHERE col1 = 'a' and col2 = 100` into col1:'a',col2:100
+	allInsertedColValues, err := getInsertedPriKeyValuesFromWhereClause(cmd.TableName, t.ColumnDefs, t.ColumnDefMap, cmd.WhereExpAst)
+	if err != nil {
+		return false, err
+	}
+
+	// Add non-primary columns to the map
+	for colName, val := range updatedNonKeyColValues {
+		allInsertedColValues[colName] = val
+	}
+
+	insertedColCount := 0
+	for insertedColName := range allInsertedColValues {
+		insertCmd.ColumnNames = append(insertCmd.ColumnNames, insertedColName)
+		insertCmd.ColumnValues = append(insertCmd.ColumnValues, &Lexem{LexemNull, ""}) // Not used by upsert, all used values are in insertedColumnValues
+		insertedColCount++
+	}
+	return t.execInternalUpsert(&insertCmd, allInsertedColValues)
 }
 
 func (t *Table) execDelete(cmd *CommandDelete) (bool, error) {

@@ -84,6 +84,10 @@ func StringToDataType(s string) DataType {
 	}
 }
 
+func IsValidDataType(s string) bool {
+	return StringToDataType(s) != DataTypeUnknown
+}
+
 func CastToInternalType(val any, cqlType DataType) (any, error) {
 	switch cqlType {
 	case DataTypeInt, DataTypeBigint, DataTypeTinyint, DataTypeSmallint:

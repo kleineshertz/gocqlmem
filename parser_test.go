@@ -144,7 +144,7 @@ func TestDropTable(t *testing.T) {
 }
 
 func TestSelect(t *testing.T) {
-	cmds, err := ParseCommands(`SELECT sum(f1) - ' FROM ', f2 + ' , ', (f3 * 3 = 9) = TRUE AND 1=NULL OR FALSE FROM ks1.t1 WHERE f1 / 2 = 10 and (f2 = 'a"') ORDER BY f1 asc, f2 desc LIMIT 10`)
+	cmds, err := ParseCommands(`SELECT sum(f1) - ' FROM ', f2 + ' , ', (f3 * 3 = 9) = TRUE AND 1=NULL OR FALSE, cast(f3 as int) FROM ks1.t1 WHERE f1 / 2 = 10 and (f2 = 'a"') ORDER BY f1 asc, f2 desc LIMIT 10`)
 	assert.Nil(t, err)
 	cmd, ok := cmds[0].(*CommandSelect)
 	assert.True(t, ok)
@@ -178,6 +178,13 @@ func TestSelect(t *testing.T) {
 	assert.Equal(t, LexemNull, cmd.SelectExpLexems[2][12].T)
 	assert.Equal(t, "||", cmd.SelectExpLexems[2][13].V)
 	assert.Equal(t, "FALSE", cmd.SelectExpLexems[2][14].V)
+
+	assert.Equal(t, "cast", cmd.SelectExpLexems[3][0].V)
+	assert.Equal(t, "(", cmd.SelectExpLexems[3][1].V)
+	assert.Equal(t, "f3", cmd.SelectExpLexems[3][2].V)
+	assert.Equal(t, ",", cmd.SelectExpLexems[3][3].V)
+	assert.Equal(t, "int", cmd.SelectExpLexems[3][4].V)
+	assert.Equal(t, ")", cmd.SelectExpLexems[3][5].V)
 
 	assert.Equal(t, "t1", cmd.TableName)
 
@@ -228,6 +235,38 @@ func TestSelect(t *testing.T) {
 	assert.Contains(t, err.Error(), "unexpected command text, a semicolon expected")
 }
 
+func TestAs(t *testing.T) {
+	cmds, err := ParseCommands(`SELECT max(cast(f1 * 32.0 as int)) as f11, f2 FROM ks1.t1 WHERE cast(f1 as text) = '1'`)
+	assert.Nil(t, err)
+	cmd, ok := cmds[0].(*CommandSelect)
+	assert.True(t, ok)
+
+	assert.Equal(t, "ks1", cmd.CtxKeyspace)
+
+	assert.Equal(t, "max", cmd.SelectExpLexems[0][0].V)
+	assert.Equal(t, "(", cmd.SelectExpLexems[0][1].V)
+	assert.Equal(t, "cast", cmd.SelectExpLexems[0][2].V)
+	assert.Equal(t, "(", cmd.SelectExpLexems[0][3].V)
+	assert.Equal(t, "f1", cmd.SelectExpLexems[0][4].V)
+	assert.Equal(t, "*", cmd.SelectExpLexems[0][5].V)
+	assert.Equal(t, "32.0", cmd.SelectExpLexems[0][6].V)
+	assert.Equal(t, ",", cmd.SelectExpLexems[0][7].V)
+	assert.Equal(t, "int", cmd.SelectExpLexems[0][8].V)
+	assert.Equal(t, ")", cmd.SelectExpLexems[0][9].V)
+	assert.Equal(t, ")", cmd.SelectExpLexems[0][10].V)
+	assert.Equal(t, "AS", cmd.SelectExpLexems[0][11].V)
+	assert.Equal(t, "f11", cmd.SelectExpLexems[0][12].V)
+	assert.Equal(t, "f2", cmd.SelectExpLexems[1][0].V)
+
+	assert.Equal(t, "t1", cmd.TableName)
+
+	assert.Equal(t, "cast", cmd.WhereExpLexems[0].V)
+	assert.Equal(t, "(", cmd.WhereExpLexems[1].V)
+	assert.Equal(t, "f1", cmd.WhereExpLexems[2].V)
+	assert.Equal(t, ",", cmd.WhereExpLexems[3].V)
+	assert.Equal(t, "text", cmd.WhereExpLexems[4].V)
+	assert.Equal(t, ")", cmd.WhereExpLexems[5].V)
+}
 func TestInsert(t *testing.T) {
 	cmds, err := ParseCommands(`USE ks1;INSERT INTO t1 (f1,f2,f3) values ('a',NULL,TRUE) IF NOT EXISTS`)
 	assert.Nil(t, err)
