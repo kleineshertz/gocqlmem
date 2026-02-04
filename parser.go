@@ -26,6 +26,8 @@ const (
 	LexemLogicalOp
 	LexemCqlOp
 	LexemParenthesis
+	LexemAsterisk
+	LexemPointedAsterisk
 	LexemNull
 	LexemAs
 )
@@ -325,7 +327,16 @@ func getLogicalOp(s string) (*Lexem, string) {
 	r := regexp.MustCompile(`^(?i)(OR|AND|=|!=|>|<|>=|<=)`)
 	litRange := r.FindStringIndex(s)
 	if len(litRange) >= 2 {
-		return &Lexem{LexemLogicalOp, strings.ToUpper(s[0:litRange[1]])}, s[litRange[1]:]
+		opValue := strings.ToUpper(s[0:litRange[1]])
+		switch opValue {
+		case "=":
+			opValue = "=="
+		case "AND":
+			opValue = "&&"
+		case "OR":
+			opValue = "||"
+		}
+		return &Lexem{LexemLogicalOp, opValue}, s[litRange[1]:]
 	}
 	return nil, s
 }
@@ -336,6 +347,34 @@ func getParenthesis(s string) (*Lexem, string) {
 	litRange := r.FindStringIndex(s)
 	if len(litRange) >= 2 {
 		return &Lexem{LexemParenthesis, s[0:litRange[1]]}, s[litRange[1]:]
+	}
+	return nil, s
+}
+
+func getAsterisk(s string) (*Lexem, string) {
+	s = skipBlank(s)
+	r := regexp.MustCompile(`^\*`)
+	litRange := r.FindStringIndex(s)
+	if len(litRange) >= 2 {
+		return &Lexem{LexemAsterisk, "ALL_FIELDS"}, s[litRange[1]:]
+	}
+	return nil, s
+}
+
+func getAsteriskOrPointedAsterisk(s string) (*Lexem, string) {
+	var l *Lexem
+	if l, s = getPointedAsterisk(s); l != nil {
+		return l, s
+	}
+	return getAsterisk(s)
+}
+
+func getPointedAsterisk(s string) (*Lexem, string) {
+	s = skipBlank(s)
+	r := regexp.MustCompile(`^("[a-zA-Z][a-zA-Z0-9_]*"|[a-zA-Z][a-zA-Z0-9_]*)\.(\*)`)
+	litRange := r.FindStringIndex(s)
+	if len(litRange) >= 2 {
+		return &Lexem{LexemPointedAsterisk, strings.ReplaceAll(strings.ReplaceAll(s[0:litRange[1]], `"`, ``), "*", "ALL_FIELDS")}, s[litRange[1]:]
 	}
 	return nil, s
 }
@@ -419,6 +458,10 @@ func getSelectExpression(s string) ([]*Lexem, string) {
 			exp = append(exp, l)
 			continue
 		}
+		if l, s = getAsteriskOrPointedAsterisk(s); l != nil {
+			exp = append(exp, l)
+			continue
+		}
 		if l, s = getIdentOrPointedIdent(s); l != nil {
 			exp = append(exp, l)
 			continue
@@ -441,7 +484,6 @@ func getSelectExpressions(s string) ([][]*Lexem, string) {
 		if len(exp) == 0 {
 			break
 		}
-		convertLogicalOpLexemsForAstParser(exp)
 		exp = convertCastForAstParser(exp)
 		exps = append(exps, exp)
 	}
@@ -471,21 +513,6 @@ func findInNotInLexem(lexems []*Lexem) (int, int) {
 	}
 	// No candidates found, give up
 	return 0, 0
-}
-
-// Convert CQL logical ops to Go
-func convertLogicalOpLexemsForAstParser(lexems []*Lexem) {
-	for i := range len(lexems) {
-		if lexems[i].T == LexemLogicalOp && lexems[i].V == "=" {
-			lexems[i].V = "=="
-		}
-		if lexems[i].T == LexemLogicalOp && lexems[i].V == "AND" {
-			lexems[i].V = "&&"
-		}
-		if lexems[i].T == LexemLogicalOp && lexems[i].V == "OR" {
-			lexems[i].V = "||"
-		}
-	}
 }
 
 // Convert IN/NOT IN to a series of Go ==/!=
@@ -615,7 +642,6 @@ func getWhereExpression(s string) ([]*Lexem, string, error) {
 		break
 	}
 
-	convertLogicalOpLexemsForAstParser(exp)
 	exp = convertCastForAstParser(exp)
 
 	var err error
@@ -864,7 +890,6 @@ func getColumnSetExpressions(s string) ([]*ColumnSetExp, string, error) {
 			return nil, s, errors.New("expected =")
 		}
 		exp.ExpLexems, s = getColumnSetExpressionLexems(s)
-		convertLogicalOpLexemsForAstParser(exp.ExpLexems)
 		exp.ExpLexems = convertCastForAstParser(exp.ExpLexems)
 		columnsSetExpList = append(columnsSetExpList, &exp)
 	}
@@ -892,6 +917,15 @@ func lexemsToString(lexems []*Lexem) (string, string, error) {
 		switch l.T {
 		case LexemComma, LexemArithmeticOp, LexemLogicalOp, LexemBoolLiteral, LexemNumberLiteral, LexemParenthesis:
 			sb.WriteString(fmt.Sprintf("%s", l.V))
+		case LexemAsterisk, LexemPointedAsterisk:
+			if i >= 2 && lexems[i-2].V == "count" && lexems[i-1].V == "(" && i < len(lexems)-1 && lexems[i+1].V == ")" {
+				// Write nothing, let it be just count()
+			} else if i == 0 && len(lexems) == 1 {
+				// This is just a SELECT * FROM ...
+				sb.WriteString(fmt.Sprintf("%s", strings.ToUpper(l.V)))
+			} else {
+				return "", "", fmt.Errorf("unexpected asterisk lexem (%d,%s), not expected here", l.T, l.V)
+			}
 		case LexemIdent, LexemPointedIdent:
 			if eval_gocqlmem.IsValidDataType(l.V) {
 				sb.WriteString(fmt.Sprintf("%s", strings.ToUpper(l.V)))
@@ -911,7 +945,7 @@ func lexemsToString(lexems []*Lexem) (string, string, error) {
 	return sb.String(), as, nil
 }
 
-func lexemsToAst(lexems []*Lexem) (ast.Expr, string, error) {
+func lexemsToAstForParserCheck(lexems []*Lexem) (ast.Expr, string, error) {
 	s, as, err := lexemsToString(lexems)
 	if err != nil {
 		return nil, "", err
@@ -1254,17 +1288,19 @@ func parseSelect(s string) (*CommandSelect, string, error) {
 		return nil, s, errors.New("ALLOW FILTERING not supported")
 	}
 
-	cmd.SelectExpAsts = make([]ast.Expr, len(cmd.SelectExpLexems))
-	cmd.SelectExpNames = make([]string, len(cmd.SelectExpLexems))
-	for i, selectExp := range cmd.SelectExpLexems {
-		cmd.SelectExpAsts[i], cmd.SelectExpNames[i], err = lexemsToAst(selectExp)
+	cmd.SelectExpAsts = []ast.Expr{}
+	cmd.SelectExpNames = []string{}
+	for _, selectExp := range cmd.SelectExpLexems {
+		astExp, name, err := lexemsToAstForParserCheck(selectExp)
 		if err != nil {
 			return nil, s, fmt.Errorf("cannot build ast from select expression: %s", err.Error())
 		}
+		cmd.SelectExpAsts = append(cmd.SelectExpAsts, astExp)
+		cmd.SelectExpNames = append(cmd.SelectExpNames, name)
 	}
 
 	if len(cmd.WhereExpLexems) > 0 {
-		cmd.WhereExpAst, _, err = lexemsToAst(cmd.WhereExpLexems)
+		cmd.WhereExpAst, _, err = lexemsToAstForParserCheck(cmd.WhereExpLexems)
 		if err != nil {
 			return nil, s, fmt.Errorf("cannot build ast from where expression: %s", err.Error())
 		}
@@ -1434,14 +1470,14 @@ func parseUpdate(s string) (*CommandUpdate, string, error) {
 
 	cmd.ColumnSetExpAsts = make([]ast.Expr, len(cmd.ColumnSetExpressions))
 	for i, columnSetExp := range cmd.ColumnSetExpressions {
-		cmd.ColumnSetExpAsts[i], _, err = lexemsToAst(columnSetExp.ExpLexems)
+		cmd.ColumnSetExpAsts[i], _, err = lexemsToAstForParserCheck(columnSetExp.ExpLexems)
 		if err != nil {
 			return nil, s, fmt.Errorf("cannot build ast from column set expression: %s", err.Error())
 		}
 	}
 
 	if len(cmd.WhereExpLexems) > 0 {
-		cmd.WhereExpAst, _, err = lexemsToAst(cmd.WhereExpLexems)
+		cmd.WhereExpAst, _, err = lexemsToAstForParserCheck(cmd.WhereExpLexems)
 		if err != nil {
 			return nil, s, fmt.Errorf("cannot build ast from where expression: %s", err.Error())
 		}
@@ -1496,7 +1532,7 @@ func parseDelete(s string) (*CommandDelete, string, error) {
 	}
 
 	if len(cmd.WhereExpLexems) > 0 {
-		cmd.WhereExpAst, _, err = lexemsToAst(cmd.WhereExpLexems)
+		cmd.WhereExpAst, _, err = lexemsToAstForParserCheck(cmd.WhereExpLexems)
 		if err != nil {
 			return nil, s, fmt.Errorf("cannot build ast from where expression: %s", err.Error())
 		}

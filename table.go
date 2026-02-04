@@ -4,10 +4,12 @@ import (
 	"cmp"
 	"fmt"
 	"go/ast"
+	"go/parser"
 	"go/token"
 	"math"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/capillariesio/gocqlmem/eval"
@@ -360,6 +362,81 @@ func (t *Table) execInsert(cmd *CommandInsert) (bool, error) {
 	return t.execInternalUpsert(cmd, insertedColumnValues)
 }
 
+func isSelectAsterisk(tableName string, lexems []*Lexem) bool {
+	if len(lexems) == 1 {
+		if lexems[0].T == LexemAsterisk {
+			return true
+		}
+		if lexems[0].T == LexemPointedAsterisk {
+			parts := strings.Split(lexems[0].V, ".")
+			if len(parts) == 2 && parts[0] == tableName {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func getResultNamesAndExpressions(tableName string, columnDefs []*ColumnDef, selectExpLexems [][]*Lexem, selectExpAsts []ast.Expr) ([]string, []ast.Expr, error) {
+	resultNames := []string{}
+	resultExps := []ast.Expr{}
+	for selectItemIdx, selectLexems := range selectExpLexems {
+		// Handle SELECT * and SELECT t.*
+		if isSelectAsterisk(tableName, selectLexems) {
+			for colIdx := range len(columnDefs) {
+				resultExp, err := parser.ParseExpr(columnDefs[colIdx].Name)
+				if err != nil {
+					return nil, nil, fmt.Errorf("dev error, cannot parse column name %s: %s", columnDefs[colIdx].Name, err.Error())
+				}
+				resultNames = append(resultNames, columnDefs[colIdx].Name)
+				resultExps = append(resultExps, resultExp)
+			}
+			continue
+		}
+		// Handle count(*), count(t.*) count(field_name), count(null)
+		if len(selectLexems) >= 4 && selectLexems[0].V == "count" && selectLexems[1].V == "(" {
+			var lexemsUnderCount []*Lexem
+			if selectLexems[len(selectLexems)-2].T == LexemAs {
+				lexemsUnderCount = selectLexems[2 : len(selectLexems)-3]
+			} else {
+				lexemsUnderCount = selectLexems[2 : len(selectLexems)-1]
+			}
+			var resultExpString string
+			if isSelectAsterisk(tableName, lexemsUnderCount) {
+				resultExpString = "count()"
+			} else {
+				s, _, err := lexemsToString(lexemsUnderCount)
+				if err != nil {
+					return nil, nil, fmt.Errorf("cannot parse count(...): %s", err.Error())
+				}
+				resultExpString = fmt.Sprintf("count_if((%s) != nil)", s)
+			}
+			resultExp, err := parser.ParseExpr(resultExpString)
+			if err != nil {
+				return nil, nil, fmt.Errorf("cannot parse count(...) expression [%s]: %s", resultExpString, err.Error())
+			}
+			if selectLexems[len(selectLexems)-2].T == LexemAs {
+				resultNames = append(resultNames, selectLexems[len(selectLexems)-1].V)
+			} else {
+				resultNames = append(resultNames, resultExpString)
+			}
+			resultExps = append(resultExps, resultExp)
+			continue
+		}
+		// Handle everything else
+		s, as, err := lexemsToString(selectLexems)
+		if err != nil {
+			return nil, nil, err
+		}
+		if as == "" {
+			as = s
+		}
+		resultNames = append(resultNames, as)
+		resultExps = append(resultExps, selectExpAsts[selectItemIdx])
+	}
+	return resultNames, resultExps, nil
+}
+
 func (t *Table) execSelect(cmd *CommandSelect) ([]string, [][]any, error) {
 	t.Lock.RLock()
 	defer t.Lock.RUnlock()
@@ -369,16 +446,22 @@ func (t *Table) execSelect(cmd *CommandSelect) ([]string, [][]any, error) {
 		return nil, nil, err
 	}
 
-	resultNames := []string{}
-	for _, selectLexems := range cmd.SelectExpLexems {
-		s, as, err := lexemsToString(selectLexems)
-		if err != nil {
-			return nil, nil, err
+	resultNames, resultExps, err := getResultNamesAndExpressions(cmd.TableName, t.ColumnDefs, cmd.SelectExpLexems, cmd.SelectExpAsts)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var isAgg bool
+	aggCtxs := make([]*eval.EvalCtx, len(resultExps))
+	for i, resultExp := range resultExps {
+		aggEnabled, aggFuncType, aggFuncArgs := eval.DetectRootAggFunc(resultExp)
+		if aggEnabled == eval.AggFuncEnabled {
+			aggCtxs[i], err = eval.NewAggEvalCtx(aggFuncType, aggFuncArgs, eval_gocqlmem.GocqlmemEvalFunctions, eval_gocqlmem.GocqlmemEvalConstants, nil)
+			if err != nil {
+				return nil, nil, err
+			}
+			isAgg = true
 		}
-		if as == "" {
-			as = s
-		}
-		resultNames = append(resultNames, as)
 	}
 
 	resultRows := [][]any{}
@@ -392,28 +475,51 @@ func (t *Table) execSelect(cmd *CommandSelect) ([]string, [][]any, error) {
 			valMap[cmd.TableName][colDef.Name] = t.ColumnValues[colIdx][i]
 		}
 
-		eCtx := eval.NewPlainEvalCtx(eval_gocqlmem.GocqlmemEvalFunctions, eval_gocqlmem.GocqlmemEvalConstants, valMap)
-		isIncludeAny, err := eCtx.Eval(cmd.WhereExpAst)
-		if err != nil {
-			return nil, nil, err
-		}
+		isInclude := true
+		var ok bool
+		if cmd.WhereExpAst != nil {
+			eCtx := eval.NewPlainEvalCtx(eval_gocqlmem.GocqlmemEvalFunctions, eval_gocqlmem.GocqlmemEvalConstants, valMap)
+			isIncludeAny, err := eCtx.Eval(cmd.WhereExpAst)
+			if err != nil {
+				return nil, nil, err
+			}
 
-		isInclude, ok := isIncludeAny.(bool)
-		if !ok {
-			return nil, nil, fmt.Errorf("where expressions return %T, expected bool", isIncludeAny)
+			isInclude, ok = isIncludeAny.(bool)
+			if !ok {
+				return nil, nil, fmt.Errorf("where expressions return %T, expected bool", isIncludeAny)
+			}
 		}
 
 		if isInclude {
-			for _, selectExpAst := range cmd.SelectExpAsts {
-				eCtx := eval.NewPlainEvalCtx(eval_gocqlmem.GocqlmemEvalFunctions, eval_gocqlmem.GocqlmemEvalConstants, valMap)
-				val, err := eCtx.Eval(selectExpAst)
+			for resultColIdx, selectExpAst := range resultExps {
+				var val any
+				var err error
+				if aggCtxs[resultColIdx] != nil {
+					aggCtxs[resultColIdx].SetVars(valMap)
+					val, err = aggCtxs[resultColIdx].Eval(selectExpAst)
+				} else {
+					eCtx := eval.NewPlainEvalCtx(eval_gocqlmem.GocqlmemEvalFunctions, eval_gocqlmem.GocqlmemEvalConstants, valMap)
+					val, err = eCtx.Eval(selectExpAst)
+				}
 				if err != nil {
 					return nil, nil, err
 				}
-				resultRow = append(resultRow, val)
+				if !isAgg {
+					resultRow = append(resultRow, val)
+				}
 			}
-			resultRows = append(resultRows, resultRow)
+			if !isAgg {
+				resultRows = append(resultRows, resultRow)
+			}
 		}
+	}
+
+	if isAgg {
+		resultRow := []any{}
+		for resultColIdx := range resultExps {
+			resultRow = append(resultRow, aggCtxs[resultColIdx].GetValue())
+		}
+		resultRows = append(resultRows, resultRow)
 	}
 
 	return resultNames, resultRows, nil

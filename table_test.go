@@ -1,6 +1,8 @@
 package gocqlmem
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/capillariesio/gocqlmem/eval_gocqlmem"
@@ -289,24 +291,46 @@ func TestTableSelect(t *testing.T) {
 		},
 		ColumnDefMap: map[string]int{"col1": 0, "col2": 1, "col3": 2},
 	}
+	var cmds []Command
+	var cmd *CommandSelect
+	var err error
+	var ok bool
+	var names []string
+	var values [][]any
 
-	cmds, err := ParseCommands(`SELECT t.col1+'a' AS c1, cast(col2*5 as text) as c2 FROM ks1.t WHERE t.col1 = 'a'`)
+	cmds, err = ParseCommands(`SELECT t.col1+'a' AS c1, cast(col2*5 as text) as c2 FROM ks1.t WHERE t.col1 = 'a'`)
 	assert.Nil(t, err)
-	cmd, ok := cmds[0].(*CommandSelect)
+	cmd, ok = cmds[0].(*CommandSelect)
 	assert.True(t, ok)
-
-	names, values, err := table.execSelect(cmd)
+	names, values, err = table.execSelect(cmd)
 	assert.Nil(t, err)
-
-	assert.Equal(t, "c1", names[0])
-	assert.Equal(t, "c2", names[1])
-
+	assert.Equal(t, "c1,c2", strings.Join(names, ","))
 	assert.Equal(t, 2, len(values))
+	assert.Equal(t, "[aa 0]", fmt.Sprintf("%v", values[0]))
+	assert.Equal(t, "[aa 5]", fmt.Sprintf("%v", values[1]))
 
-	assert.Equal(t, "aa", values[0][0])
-	assert.Equal(t, "0", values[0][1])
-	assert.Equal(t, "aa", values[1][0])
-	assert.Equal(t, "5", values[1][1])
+	cmds, err = ParseCommands(`SELECT *, col2 FROM ks1.t WHERE t.col1 = 'a' OR col2 = 3`)
+	assert.Nil(t, err)
+	cmd, ok = cmds[0].(*CommandSelect)
+	assert.True(t, ok)
+	names, values, err = table.execSelect(cmd)
+	assert.Nil(t, err)
+	assert.Equal(t, "col1,col2,col2", strings.Join(names, ","))
+	assert.Equal(t, 4, len(values))
+	assert.Equal(t, "[a 0 0]", fmt.Sprintf("%v", values[0]))
+	assert.Equal(t, "[a 1 1]", fmt.Sprintf("%v", values[1]))
+	assert.Equal(t, "[c 3 3]", fmt.Sprintf("%v", values[2]))
+	assert.Equal(t, "[d 3 3]", fmt.Sprintf("%v", values[3]))
+
+	cmds, err = ParseCommands(`SELECT count(*) as c FROM ks1.t WHERE col1='c'`)
+	assert.Nil(t, err)
+	cmd, ok = cmds[0].(*CommandSelect)
+	assert.True(t, ok)
+	names, values, err = table.execSelect(cmd)
+	assert.Nil(t, err)
+	assert.Equal(t, "c", strings.Join(names, ","))
+	assert.Equal(t, 1, len(values))
+	assert.Equal(t, "[1]", fmt.Sprintf("%v", values[0]))
 }
 
 func TestTableUpdate(t *testing.T) {
