@@ -356,7 +356,7 @@ func getAsterisk(s string) (*Lexem, string) {
 	r := regexp.MustCompile(`^\*`)
 	litRange := r.FindStringIndex(s)
 	if len(litRange) >= 2 {
-		return &Lexem{LexemAsterisk, "ALL_FIELDS"}, s[litRange[1]:]
+		return &Lexem{LexemAsterisk, s[0:litRange[1]]}, s[litRange[1]:]
 	}
 	return nil, s
 }
@@ -374,7 +374,7 @@ func getPointedAsterisk(s string) (*Lexem, string) {
 	r := regexp.MustCompile(`^("[a-zA-Z][a-zA-Z0-9_]*"|[a-zA-Z][a-zA-Z0-9_]*)\.(\*)`)
 	litRange := r.FindStringIndex(s)
 	if len(litRange) >= 2 {
-		return &Lexem{LexemPointedAsterisk, strings.ReplaceAll(strings.ReplaceAll(s[0:litRange[1]], `"`, ``), "*", "ALL_FIELDS")}, s[litRange[1]:]
+		return &Lexem{LexemPointedAsterisk, strings.ReplaceAll(s[0:litRange[1]], `"`, ``)}, s[litRange[1]:]
 	}
 	return nil, s
 }
@@ -911,9 +911,9 @@ func lexemsToString(lexems []*Lexem) (string, string, error) {
 			as = lexems[i+1].V
 			break
 		}
-		if sb.Len() > 0 {
-			sb.WriteString(" ")
-		}
+		// if sb.Len() > 0 {
+		// 	sb.WriteString(" ")
+		// }
 		switch l.T {
 		case LexemComma, LexemArithmeticOp, LexemLogicalOp, LexemBoolLiteral, LexemNumberLiteral, LexemParenthesis:
 			sb.WriteString(fmt.Sprintf("%s", l.V))
@@ -922,7 +922,7 @@ func lexemsToString(lexems []*Lexem) (string, string, error) {
 				// Write nothing, let it be just count()
 			} else if i == 0 && len(lexems) == 1 {
 				// This is just a SELECT * FROM ...
-				sb.WriteString(fmt.Sprintf("%s", strings.ToUpper(l.V)))
+				sb.WriteString(fmt.Sprintf("%s", strings.ReplaceAll(l.V, "*", "ALL_FIELDS")))
 			} else {
 				return "", "", fmt.Errorf("unexpected asterisk lexem (%d,%s), not expected here", l.T, l.V)
 			}

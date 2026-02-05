@@ -135,22 +135,22 @@ type RowData struct {
 	Values  []interface{}
 }
 
-func dereference(i interface{}) interface{} {
-	return reflect.Indirect(reflect.ValueOf(i)).Interface()
-}
+// func dereference(i interface{}) interface{} {
+// 	return reflect.Indirect(reflect.ValueOf(i)).Interface()
+// }
 
-func (r *RowData) rowMap(m map[string]interface{}) {
-	for i, column := range r.Columns {
-		val := dereference(r.Values[i])
-		if valVal := reflect.ValueOf(val); valVal.Kind() == reflect.Slice {
-			valCopy := reflect.MakeSlice(valVal.Type(), valVal.Len(), valVal.Cap())
-			reflect.Copy(valCopy, valVal)
-			m[column] = valCopy.Interface()
-		} else {
-			m[column] = val
-		}
-	}
-}
+// func (r *RowData) rowMap(m map[string]interface{}) {
+// 	for i, column := range r.Columns {
+// 		val := dereference(r.Values[i])
+// 		if valVal := reflect.ValueOf(val); valVal.Kind() == reflect.Slice {
+// 			valCopy := reflect.MakeSlice(valVal.Type(), valVal.Len(), valVal.Cap())
+// 			reflect.Copy(valCopy, valVal)
+// 			m[column] = valCopy.Interface()
+// 		} else {
+// 			m[column] = val
+// 		}
+// 	}
+// }
 
 type nextIter struct {
 	qry   *Query
@@ -533,32 +533,9 @@ func (iter *Iter) RowData() (RowData, error) {
 		return RowData{}, iter.err
 	}
 
-	columns := make([]string, 0, len(iter.Columns()))
-	values := make([]interface{}, 0, len(iter.Columns()))
-
-	for _, column := range iter.Columns() {
-		if c, ok := column.TypeInfo.(TupleTypeInfo); !ok {
-			val, err := column.TypeInfo.NewWithError()
-			if err != nil {
-				return RowData{}, err
-			}
-			columns = append(columns, column.Name)
-			values = append(values, val)
-		} else {
-			for i, elem := range c.Elems {
-				columns = append(columns, TupleColumnName(column.Name, i))
-				val, err := elem.NewWithError()
-				if err != nil {
-					return RowData{}, err
-				}
-				values = append(values, val)
-			}
-		}
-	}
-
 	rowData := RowData{
-		Columns: columns,
-		Values:  values,
+		Columns: iter.RetrievedNames,
+		Values:  make([]interface{}, len(iter.RetrievedNames)),
 	}
 
 	return rowData, nil
@@ -598,7 +575,9 @@ func (iter *Iter) SliceMap() ([]map[string]interface{}, error) {
 	dataToReturn := make([]map[string]interface{}, 0)
 	for iter.Scan(rowData.Values...) {
 		m := make(map[string]interface{}, len(rowData.Columns))
-		rowData.rowMap(m)
+		for i, column := range rowData.Columns {
+			m[column] = rowData.Values[i]
+		}
 		dataToReturn = append(dataToReturn, m)
 	}
 	if iter.err != nil {
@@ -631,6 +610,64 @@ func (q *Query) PageState(state []byte) *Query {
 	q.disableAutoPage = true
 	return q
 }
+
+type Scanner interface {
+	// Next advances the row pointer to point at the next row, the row is valid until
+	// the next call of Next. It returns true if there is a row which is available to be
+	// scanned into with Scan.
+	// Next must be called before every call to Scan.
+	Next() bool
+
+	// Scan copies the current row's columns into dest. If the length of dest does not equal
+	// the number of columns returned in the row an error is returned. If an error is encountered
+	// when unmarshalling a column into the value in dest an error is returned and the row is invalidated
+	// until the next call to Next.
+	// Next must be called before calling Scan, if it is not an error is returned.
+	Scan(...interface{}) error
+
+	// Err returns the if there was one during iteration that resulted in iteration being unable to complete.
+	// Err will also release resources held by the iterator, the Scanner should not used after being called.
+	Err() error
+}
+type iterScanner struct {
+	iter  *Iter
+	cols  []interface{}
+	valid bool
+}
+
+func (is *iterScanner) Next() bool {
+	if is.iter.pos >= len(is.iter.RetrievedValues) {
+		return false
+	}
+	for i := range len(is.iter.RetrievedNames) {
+		is.cols[i] = is.iter.RetrievedValues[is.iter.pos][i]
+	}
+	is.iter.pos++
+	return true
+}
+
+func (is *iterScanner) Scan(dest ...interface{}) error {
+	for i := range len(is.cols) {
+		dest[i] = is.cols[i]
+	}
+	return nil
+}
+func (is *iterScanner) Err() error {
+	iter := is.iter
+	is.iter = nil
+	is.cols = nil
+	is.valid = false
+	return iter.Close()
+}
+
+func (iter *Iter) Scanner() Scanner {
+	if iter == nil {
+		return nil
+	}
+
+	return &iterScanner{iter: iter, cols: make([]interface{}, len(iter.RetrievedNames))}
+}
+
 func (q *Query) Iter() *Iter {
 	cmds, err := ParseCommands(q.stmt)
 	if err != nil {
@@ -705,17 +742,17 @@ func (iter *Iter) checkErrAndNotFound() error {
 }
 
 func (iter *Iter) Scan(dest ...interface{}) bool {
-	if iter.err != nil {
+	if iter.err != nil || iter.pos >= len(iter.RetrievedValues) {
 		return false
 	}
 
 	if len(dest) != len(iter.RetrievedNames) {
-		iter.err = fmt.Errorf("gocqlmem: not enough columns to scan into: have %d want %d", len(dest), iter.meta.actualColCount)
+		iter.err = fmt.Errorf("gocqlmem: not enough columns to scan into: have %d want %d", len(dest), len(iter.RetrievedNames))
 		return false
 	}
 
 	for i := range len(iter.RetrievedNames) {
-		dest[i] = iter.RetrievedValues[i][iter.pos]
+		dest[i] = iter.RetrievedValues[iter.pos][i]
 	}
 
 	iter.pos++
@@ -772,7 +809,7 @@ func (iter *Iter) MapScan(m map[string]interface{}) bool {
 	}
 
 	rowDataValues := make([]any, len(iter.RetrievedNames))
-	if iter.Scan(rowDataValues) {
+	if iter.Scan(rowDataValues...) {
 		for i, name := range iter.RetrievedNames {
 			m[name] = rowDataValues[i]
 		}

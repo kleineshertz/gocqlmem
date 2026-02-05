@@ -100,6 +100,9 @@ func (ectx *EvalCtx) SetRoundDec(roundDec int32) {
 }
 
 func (ectx *EvalCtx) GetValue() any {
+	if ectx.aggEnabled == AggFuncEnabled && (ectx.aggFunc == AggCount || ectx.aggFunc == AggCountIf) && ectx.value == nil {
+		return int64(0)
+	}
 	return ectx.value
 }
 
@@ -167,6 +170,7 @@ func NewPlainEvalCtx(functions map[string]EvalFunction, constants map[string]any
 
 func NewAggEvalCtx(aggFuncType AggFuncType, aggFuncArgs []ast.Expr, functions map[string]EvalFunction, constants map[string]any, vars VarValuesMap) (*EvalCtx, error) {
 	eCtx := newPlainEvalCtx(AggFuncEnabled)
+	eCtx.aggFunc = aggFuncType
 	eCtx.evalFunctions = functions
 	eCtx.evalConstants = constants
 	eCtx.evalVars = vars

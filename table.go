@@ -52,9 +52,6 @@ func createColDef(name string, mapColType map[string]eval_gocqlmem.DataType, pri
 	if primaryKeyType == PrimaryKeyPartition {
 		clusteringOrder = ClusteringOrderAsc
 	}
-	if !ok {
-		return nil, fmt.Errorf("cannot find definition for column %s", name)
-	}
 	return &ColumnDef{
 		Name:            name,
 		PrimaryKey:      primaryKeyType,
@@ -403,22 +400,23 @@ func getResultNamesAndExpressions(tableName string, columnDefs []*ColumnDef, sel
 			}
 			var resultExpString string
 			if isSelectAsterisk(tableName, lexemsUnderCount) {
+				resultNames = append(resultNames, fmt.Sprintf("count(%s)", selectLexems[2].V))
 				resultExpString = "count()"
 			} else {
 				s, _, err := lexemsToString(lexemsUnderCount)
 				if err != nil {
 					return nil, nil, fmt.Errorf("cannot parse count(...): %s", err.Error())
 				}
+				resultNames = append(resultNames, fmt.Sprintf("count(%s)", s))
 				resultExpString = fmt.Sprintf("count_if((%s) != nil)", s)
 			}
 			resultExp, err := parser.ParseExpr(resultExpString)
 			if err != nil {
 				return nil, nil, fmt.Errorf("cannot parse count(...) expression [%s]: %s", resultExpString, err.Error())
 			}
+			// Override result column name if needed
 			if selectLexems[len(selectLexems)-2].T == LexemAs {
-				resultNames = append(resultNames, selectLexems[len(selectLexems)-1].V)
-			} else {
-				resultNames = append(resultNames, resultExpString)
+				resultNames[len(resultNames)-1] = selectLexems[len(selectLexems)-1].V
 			}
 			resultExps = append(resultExps, resultExp)
 			continue
