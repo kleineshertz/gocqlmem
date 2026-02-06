@@ -91,6 +91,10 @@ type EvalCtx struct {
 	evalVars      VarValuesMap
 }
 
+func (ectx *EvalCtx) IsAggFuncEnabled() bool {
+	return ectx.aggEnabled == AggFuncEnabled
+}
+
 func (ectx *EvalCtx) SetVars(vars VarValuesMap) {
 	ectx.evalVars = vars
 }
@@ -103,6 +107,17 @@ func (ectx *EvalCtx) GetValue() any {
 	if ectx.aggEnabled == AggFuncEnabled && (ectx.aggFunc == AggCount || ectx.aggFunc == AggCountIf) && ectx.value == nil {
 		return int64(0)
 	}
+	return ectx.value
+}
+
+func (ectx *EvalCtx) GetSafeValue(defaultValue any) any {
+	if ectx.aggEnabled == AggFuncEnabled && (ectx.aggFunc == AggCount || ectx.aggFunc == AggCountIf) {
+		return ectx.GetValue()
+	}
+	if ectx.value == nil {
+		return defaultValue
+	}
+
 	return ectx.value
 }
 
@@ -621,6 +636,16 @@ func (eCtx *EvalCtx) evalBinaryBoolToBoolExp(valLeftVolatile any, exp *ast.Binar
 	}
 }
 func (eCtx *EvalCtx) evalBinaryCompareExp(valLeftVolatile any, exp *ast.BinaryExpr, valRightVolatile any) (any, error) {
+	if (valLeftVolatile == nil && valRightVolatile != nil) || (valLeftVolatile != nil && valRightVolatile == nil) {
+		// Cannot be compared, NEQ returns true, all other ops return false
+		eCtx.value = (exp.Op == token.NEQ)
+		return eCtx.value, nil
+	}
+	if valLeftVolatile == nil && valRightVolatile == nil {
+		// EQ returns true, all other ops return false
+		eCtx.value = (exp.Op == token.EQL)
+		return eCtx.value, nil
+	}
 	var err error
 	switch valLeftVolatile.(type) {
 	case time.Time:

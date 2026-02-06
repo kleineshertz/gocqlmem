@@ -14,6 +14,7 @@ import (
 
 	"github.com/capillariesio/gocqlmem/eval"
 	"github.com/capillariesio/gocqlmem/eval_gocqlmem"
+	"github.com/shopspring/decimal"
 )
 
 type PrimaryKeyType int
@@ -202,7 +203,7 @@ func convertLexemToInternalType(lexem *Lexem, cqlType eval_gocqlmem.DataType) (a
 		return nil, nil
 	}
 	switch cqlType {
-	case eval_gocqlmem.DataTypeBigint, eval_gocqlmem.DataTypeTinyint, eval_gocqlmem.DataTypeSmallint:
+	case eval_gocqlmem.DataTypeBigint, eval_gocqlmem.DataTypeInt, eval_gocqlmem.DataTypeTinyint, eval_gocqlmem.DataTypeSmallint:
 		if lexem.T != LexemNumberLiteral {
 			return 0, fmt.Errorf("cannot convert %v to integer, lexem type %d not supported", lexem.V, lexem.T)
 		}
@@ -211,6 +212,26 @@ func convertLexemToInternalType(lexem *Lexem, cqlType eval_gocqlmem.DataType) (a
 			return 0, fmt.Errorf("cannot convert %v to integer: %s", lexem.V, err.Error())
 		}
 		return int64(val), nil
+
+	case eval_gocqlmem.DataTypeDouble, eval_gocqlmem.DataTypeFloat:
+		if lexem.T != LexemNumberLiteral {
+			return 0, fmt.Errorf("cannot convert %v to float, lexem type %d not supported", lexem.V, lexem.T)
+		}
+		val, err := strconv.ParseFloat(lexem.V, 64)
+		if err != nil {
+			return 0, fmt.Errorf("cannot convert %v to float: %s", lexem.V, err.Error())
+		}
+		return float64(val), nil
+
+	case eval_gocqlmem.DataTypeDecimal:
+		if lexem.T != LexemNumberLiteral {
+			return 0, fmt.Errorf("cannot convert %v to decimal, lexem type %d not supported", lexem.V, lexem.T)
+		}
+		val, err := decimal.NewFromString(lexem.V)
+		if err != nil {
+			return 0, fmt.Errorf("cannot convert %v to decimal: %s", lexem.V, err.Error())
+		}
+		return val, nil
 
 	case eval_gocqlmem.DataTypeText, eval_gocqlmem.DataTypeVarchar:
 		if lexem.T != LexemStringLiteral {
@@ -391,7 +412,7 @@ func getResultNamesAndExpressions(tableName string, columnDefs []*ColumnDef, sel
 			continue
 		}
 		// Handle count(*), count(t.*) count(field_name), count(null)
-		if len(selectLexems) >= 4 && selectLexems[0].V == "count" && selectLexems[1].V == "(" {
+		if len(selectLexems) >= 4 && (selectLexems[0].V == "count" || selectLexems[0].V == "COUNT") && selectLexems[1].V == "(" {
 			var lexemsUnderCount []*Lexem
 			if selectLexems[len(selectLexems)-2].T == LexemAs {
 				lexemsUnderCount = selectLexems[2 : len(selectLexems)-3]
@@ -408,7 +429,7 @@ func getResultNamesAndExpressions(tableName string, columnDefs []*ColumnDef, sel
 					return nil, nil, fmt.Errorf("cannot parse count(...): %s", err.Error())
 				}
 				resultNames = append(resultNames, fmt.Sprintf("count(%s)", s))
-				resultExpString = fmt.Sprintf("count_if((%s) != nil)", s)
+				resultExpString = fmt.Sprintf("count_if((%s) != NULL)", s) // GocqlmemEvalConstants will take care of NULL
 			}
 			resultExp, err := parser.ParseExpr(resultExpString)
 			if err != nil {
@@ -459,6 +480,8 @@ func (t *Table) execSelect(cmd *CommandSelect) ([]string, [][]any, error) {
 				return nil, nil, err
 			}
 			isAgg = true
+		} else {
+			aggCtxs[i] = eval.NewPlainEvalCtx(eval_gocqlmem.GocqlmemEvalFunctions, eval_gocqlmem.GocqlmemEvalConstants, nil)
 		}
 	}
 
@@ -466,6 +489,8 @@ func (t *Table) execSelect(cmd *CommandSelect) ([]string, [][]any, error) {
 	valMap := eval.VarValuesMap{}
 	valMap[""] = map[string]any{}
 	valMap[cmd.TableName] = map[string]any{}
+	// In Apache Cassandra, if you use an aggregate function (like SUM, AVG, COUNT, MAX, MIN) and select other non-aggregated columns in the same query, Cassandra returns the first row it encounters for those non-aggregated columns.
+	var isFirstHitAlreadyPassed bool
 	for _, i := range selectSeq {
 		resultRow := []any{}
 		for colIdx, colDef := range t.ColumnDefs {
@@ -492,20 +517,18 @@ func (t *Table) execSelect(cmd *CommandSelect) ([]string, [][]any, error) {
 			for resultColIdx, selectExpAst := range resultExps {
 				var val any
 				var err error
-				if aggCtxs[resultColIdx] != nil {
+				if aggCtxs[resultColIdx].IsAggFuncEnabled() || !isFirstHitAlreadyPassed {
 					aggCtxs[resultColIdx].SetVars(valMap)
 					val, err = aggCtxs[resultColIdx].Eval(selectExpAst)
-				} else {
-					eCtx := eval.NewPlainEvalCtx(eval_gocqlmem.GocqlmemEvalFunctions, eval_gocqlmem.GocqlmemEvalConstants, valMap)
-					val, err = eCtx.Eval(selectExpAst)
-				}
-				if err != nil {
-					return nil, nil, err
+					if err != nil {
+						return nil, nil, err
+					}
 				}
 				if !isAgg {
 					resultRow = append(resultRow, val)
 				}
 			}
+			isFirstHitAlreadyPassed = true
 			if !isAgg {
 				resultRows = append(resultRows, resultRow)
 			}

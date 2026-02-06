@@ -31,6 +31,7 @@ func assertIterSliceMap(t *testing.T, expectedRows string, expectedErr string, s
 
 func assertIterScan(t *testing.T, expectedRows string, s *Session, q string) {
 	iter := s.Query(q).Iter()
+	assert.Nil(t, iter.err)
 	row := make([]interface{}, len(iter.RetrievedNames))
 	sb := strings.Builder{}
 	for iter.Scan(row...) {
@@ -64,9 +65,14 @@ func assertScanner(t *testing.T, expectedRows string, s *Session, q string) {
 	assert.Equal(t, expectedRows, sb.String())
 }
 
+func assertUpserMapScanCas(t *testing.T, isApplyExpected bool, s *Session, q string, existingRowMap map[string]interface{}) {
+	isApplied, err := s.Query(q).MapScanCAS(existingRowMap)
+	assert.Nil(t, err)
+	assert.Equal(t, isApplyExpected, isApplied)
+}
+
 func TestCountStar(t *testing.T) {
 	// var rows []map[string]any
-	// var err error
 
 	s := NewSession()
 	assert.Nil(t, s.Query("CREATE KEYSPACE ks1").Exec())
@@ -97,36 +103,17 @@ func TestCountStar(t *testing.T) {
 	// Star with with other aggregates
 	assertIterSliceMap(t, "map[avg(a):<nil> count(*):0]", "", s, "SELECT count(*), avg(a) FROM ks1.t1")
 
-	//assertColumnNames(execute("SELECT COUNT(*) FROM %s"), "count");
-	// assertRows(execute("SELECT COUNT(*) FROM %s"), row(0L));
-	// assertColumnNames(execute("SELECT COUNT(1) FROM %s"), "count");
-	// assertRows(execute("SELECT COUNT(1) FROM %s"), row(0L));
-	// assertColumnNames(execute("SELECT COUNT(*), COUNT(*) FROM %s"), "count", "count");
-	// assertRows(execute("SELECT COUNT(*), COUNT(*) FROM %s"), row(0L, 0L));
+	existingRowMap := map[string]interface{}{}
+	assertUpserMapScanCas(t, true, s, "INSERT INTO ks1.t1 (a, b, c) VALUES (1, 1, 11.5)", existingRowMap)
+	assertUpserMapScanCas(t, true, s, "INSERT INTO ks1.t1 (a, b, c) VALUES (1, 2, 9.5)", existingRowMap)
+	assertUpserMapScanCas(t, true, s, "INSERT INTO ks1.t1 (a, b, c) VALUES (1, 3, 9.0)", existingRowMap)
+	assertUpserMapScanCas(t, true, s, "INSERT INTO ks1.t1 (a, b, c) VALUES (1, 5, 1.0)", existingRowMap)
 
-	// // Test with alias
-	// assertColumnNames(execute("SELECT COUNT(*) as myCount FROM %s"), "mycount");
-	// assertRows(execute("SELECT COUNT(*) as myCount FROM %s"), row(0L));
-	// assertColumnNames(execute("SELECT COUNT(1) as myCount FROM %s"), "mycount");
-	// assertRows(execute("SELECT COUNT(1) as myCount FROM %s"), row(0L));
-
-	// // Test with other aggregates
-	// assertColumnNames(execute("SELECT COUNT(*), max(b), b FROM %s"), "count", "system.max(b)", "b");
-	// assertRows(execute("SELECT COUNT(*), max(b), b  FROM %s"), row(0L, null, null));
-	// assertColumnNames(execute("SELECT COUNT(1), max(b), b FROM %s"), "count", "system.max(b)", "b");
-	// assertRows(execute("SELECT COUNT(1), max(b), b  FROM %s"), row(0L, null, null));
-
-	// execute("INSERT INTO %s (a, b, c) VALUES (1, 1, 11.5)");
-	// execute("INSERT INTO %s (a, b, c) VALUES (1, 2, 9.5)");
-	// execute("INSERT INTO %s (a, b, c) VALUES (1, 3, 9.0)");
-	// execute("INSERT INTO %s (a, b, c) VALUES (1, 5, 1.0)");
-
-	// assertRows(execute("SELECT COUNT(*) FROM %s"), row(4L));
-	// assertRows(execute("SELECT COUNT(1) FROM %s"), row(4L));
-	// assertRows(execute("SELECT max(b), b, COUNT(*) FROM %s"), row(5, 1, 4L));
-	// assertRows(execute("SELECT max(b), COUNT(1), b FROM %s"), row(5, 4L, 1));
+	assertIterScan(t, "[[4]]", s, "SELECT COUNT(*) FROM ks1.t1")
+	assertIterScan(t, "[[4]]", s, "SELECT COUNT(1) FROM ks1.t1")
+	assertIterScan(t, "[[5 1 4]]", s, "SELECT max(b), b, COUNT(*) FROM ks1.t1")
+	assertIterScan(t, "[[5 4 1]]", s, "SELECT max(b), COUNT(1), b FROM ks1.t1")
 	// // Makes sure that LIMIT does not affect the result of aggregates
-	// assertRows(execute("SELECT max(b), COUNT(1), b FROM %s LIMIT 2"), row(5, 4L, 1));
-	// assertRows(execute("SELECT max(b), COUNT(1), b FROM %s WHERE a = 1 LIMIT 2"), row(5, 4L, 1));
-
+	assertIterScan(t, "[[5 4 1]]", s, "SELECT max(b), COUNT(1), b FROM ks1.t1 LIMIT 2")
+	assertIterScan(t, "[[5 4 1]]", s, "SELECT max(b), COUNT(1), b FROM ks1.t1 WHERE a = 1 LIMIT 2")
 }

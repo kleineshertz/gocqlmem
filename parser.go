@@ -911,14 +911,11 @@ func lexemsToString(lexems []*Lexem) (string, string, error) {
 			as = lexems[i+1].V
 			break
 		}
-		// if sb.Len() > 0 {
-		// 	sb.WriteString(" ")
-		// }
 		switch l.T {
 		case LexemComma, LexemArithmeticOp, LexemLogicalOp, LexemBoolLiteral, LexemNumberLiteral, LexemParenthesis:
 			sb.WriteString(fmt.Sprintf("%s", l.V))
 		case LexemAsterisk, LexemPointedAsterisk:
-			if i >= 2 && lexems[i-2].V == "count" && lexems[i-1].V == "(" && i < len(lexems)-1 && lexems[i+1].V == ")" {
+			if i >= 2 && (lexems[i-2].V == "count" || lexems[i-2].V == "COUNT") && lexems[i-1].V == "(" && i < len(lexems)-1 && lexems[i+1].V == ")" {
 				// Write nothing, let it be just count()
 			} else if i == 0 && len(lexems) == 1 {
 				// This is just a SELECT * FROM ...
@@ -928,14 +925,18 @@ func lexemsToString(lexems []*Lexem) (string, string, error) {
 			}
 		case LexemIdent, LexemPointedIdent:
 			if eval_gocqlmem.IsValidDataType(l.V) {
+				// CQL data types are UPPERCASE
 				sb.WriteString(fmt.Sprintf("%s", strings.ToUpper(l.V)))
+			} else if i < len(lexems)-1 && lexems[i+1].V == "(" {
+				// functions are lowercase
+				sb.WriteString(fmt.Sprintf("%s", strings.ToLower(l.V)))
 			} else {
 				sb.WriteString(fmt.Sprintf("%s", l.V))
 			}
 		case LexemStringLiteral:
 			sb.WriteString(fmt.Sprintf("`%s`", l.V))
 		case LexemNull:
-			sb.WriteString("nil")
+			sb.WriteString("NULL") // GocqlmemEvalConstants will take care of this
 		case LexemSemicolon, LexemCqlOp, LexemKeyword:
 			return "", "", fmt.Errorf("unexpected lexem (%d,%s)", l.T, l.V)
 		default:
