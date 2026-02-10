@@ -106,7 +106,7 @@ const (
 
 func (eCtx *EvalCtx) checkAgg(funcName string, callExp *ast.CallExpr, aggFunc AggFuncType) error {
 	if eCtx.aggEnabled != AggFuncEnabled {
-		return fmt.Errorf("cannot evaluate %s(), context aggregate not enabled (sorry, only expressions with root agg function are supported, no sum(...)*x or sum(...)+y)", funcName)
+		return fmt.Errorf("cannot evaluate %s(), context aggregate not enabled (either agg function is not expected in this expression at all, or agg function is not in the root of the expression, like no sum(...)*x or sum(...)+y)", funcName)
 	}
 	if eCtx.aggCallExp != nil {
 		if eCtx.aggCallExp != callExp {

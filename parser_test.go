@@ -107,7 +107,7 @@ func TestCreateTable(t *testing.T) {
 	assert.Equal(t, "f2", cr.ClusteringKeyColumns[0])
 
 	cmds, err = ParseCommands(`CREATE  TABLE   ks1.t1  ( f1  TEXT ) `)
-	assert.Contains(t, err.Error(), "missing column def or missing PRIMARY KEY")
+	assert.Contains(t, err.Error(), "expected PRIMARY KEY")
 
 	cmds, err = ParseCommands(`CREATE TABLE ks1.t1 ( PRIMARY KEY() )`)
 	assert.Contains(t, err.Error(), "cannot parse CREATE TABLE with empty columnn def list")

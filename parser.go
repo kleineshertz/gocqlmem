@@ -341,13 +341,20 @@ func getLogicalOp(s string) (*Lexem, string) {
 	return nil, s
 }
 
-func getParenthesis(s string) (*Lexem, string) {
+func getParenthesis(s string, isProcess bool) (*Lexem, string) {
 	s = skipBlank(s)
 	r := regexp.MustCompile(`^[()]`)
 	litRange := r.FindStringIndex(s)
 	if len(litRange) >= 2 {
-		return &Lexem{LexemParenthesis, s[0:litRange[1]]}, s[litRange[1]:]
+		reBlank := regexp.MustCompile(`\s+`)
+		result := strings.ToUpper(reBlank.ReplaceAllString(s[0:litRange[1]], " "))
+		if isProcess {
+			return &Lexem{LexemParenthesis, result}, s[litRange[1]:]
+		} else {
+			return &Lexem{LexemParenthesis, result}, s
+		}
 	}
+
 	return nil, s
 }
 
@@ -421,40 +428,40 @@ func getSelectExpression(s string) ([]*Lexem, string) {
 			exp = append(exp, l)
 			continue
 		}
-		if l, s = getBoolLiteral(s); l != nil {
-			exp = append(exp, l)
-			continue
-		}
-		if l, s = getNull(s); l != nil {
-			exp = append(exp, l)
-			continue
-		}
-		if l, s = getStringLiteral(s); l != nil {
-			exp = append(exp, l)
-			continue
-		}
-		if len(exp) == 0 || exp[len(exp)-1].V == "(" || exp[len(exp)-1].T == LexemArithmeticOp || exp[len(exp)-1].T == LexemLogicalOp {
+		if len(exp) == 0 || exp[len(exp)-1].V == "(" || exp[len(exp)-1].T == LexemComma || exp[len(exp)-1].T == LexemArithmeticOp || exp[len(exp)-1].T == LexemLogicalOp {
 			// No arithmetic op allowed here
+			if l, s = getBoolLiteral(s); l != nil {
+				exp = append(exp, l)
+				continue
+			}
+			if l, s = getNull(s); l != nil {
+				exp = append(exp, l)
+				continue
+			}
+			if l, s = getStringLiteral(s); l != nil {
+				exp = append(exp, l)
+				continue
+			}
 			if l, s = getNumberLiteral(s); l != nil {
 				exp = append(exp, l)
 				continue
 			}
 		} else {
-			// No number literal allowed here
+			// No literal allowed here
 			if l, s = getArithmeticOp(s); l != nil {
 				exp = append(exp, l)
 				continue
 			}
-		}
-		if l, s = getLogicalOp(s); l != nil {
-			exp = append(exp, l)
-			continue
+			if l, s = getLogicalOp(s); l != nil {
+				exp = append(exp, l)
+				continue
+			}
 		}
 		if l, s = getAs(s); l != nil {
 			exp = append(exp, l)
 			continue
 		}
-		if l, s = getParenthesis(s); l != nil {
+		if l, s = getParenthesis(s, true); l != nil {
 			exp = append(exp, l)
 			continue
 		}
@@ -594,40 +601,40 @@ func getWhereExpression(s string) ([]*Lexem, string, error) {
 			exp = append(exp, l)
 			continue
 		}
-		if l, s = getBoolLiteral(s); l != nil {
-			exp = append(exp, l)
-			continue
-		}
-		if l, s = getNull(s); l != nil {
-			exp = append(exp, l)
-			continue
-		}
-		if l, s = getStringLiteral(s); l != nil {
-			exp = append(exp, l)
-			continue
-		}
-		if len(exp) == 0 || exp[len(exp)-1].V == "(" || exp[len(exp)-1].T == LexemArithmeticOp || exp[len(exp)-1].T == LexemLogicalOp {
+		if len(exp) == 0 || exp[len(exp)-1].V == "(" || exp[len(exp)-1].T == LexemComma || exp[len(exp)-1].T == LexemArithmeticOp || exp[len(exp)-1].T == LexemLogicalOp {
 			// No arithmetic op allowed here
+			if l, s = getBoolLiteral(s); l != nil {
+				exp = append(exp, l)
+				continue
+			}
+			if l, s = getNull(s); l != nil {
+				exp = append(exp, l)
+				continue
+			}
+			if l, s = getStringLiteral(s); l != nil {
+				exp = append(exp, l)
+				continue
+			}
 			if l, s = getNumberLiteral(s); l != nil {
 				exp = append(exp, l)
 				continue
 			}
 		} else {
-			// No number literal allowed here
+			// No literal allowed here
 			if l, s = getArithmeticOp(s); l != nil {
 				exp = append(exp, l)
 				continue
 			}
-		}
-		if l, s = getLogicalOp(s); l != nil {
-			exp = append(exp, l)
-			continue
+			if l, s = getLogicalOp(s); l != nil {
+				exp = append(exp, l)
+				continue
+			}
 		}
 		if l, s = getAs(s); l != nil {
 			exp = append(exp, l)
 			continue
 		}
-		if l, s = getParenthesis(s); l != nil {
+		if l, s = getParenthesis(s, true); l != nil {
 			exp = append(exp, l)
 			continue
 		}
@@ -710,11 +717,11 @@ func getKeyValuePairList(s string) ([]*KeyValuePair, string, error) {
 	return kvPairList, s, nil
 }
 
-func getColumnDef(s string) (*CreateTableColumnDef, string, error) {
+func getColumnDef(s string) (*CreateTableColumnDef, string, bool, error) {
 	s = skipBlank(s)
 	var l *Lexem
 	if l, s = getKeyword(s, `\)`, false); l != nil {
-		return nil, s, nil
+		return nil, s, false, nil
 	}
 	def := CreateTableColumnDef{}
 	l, s = getIdent(s)
@@ -724,41 +731,64 @@ func getColumnDef(s string) (*CreateTableColumnDef, string, error) {
 		if l != nil {
 			def.Type = eval_gocqlmem.StringToDataType(l.V)
 			if def.Type == eval_gocqlmem.DataTypeUnknown {
-				return nil, s, fmt.Errorf("cannot parse column def type, unsupported type %s", s)
+				return nil, s, false, fmt.Errorf("cannot parse column def type, unsupported type %s", s)
 			}
-			return &def, s, nil
+			l, s = getKeyword(s, `(?i)(PRIMARY\s+KEY)`, true)
+			if l != nil {
+				// This field def has PRIMARY KEY tag right in it
+				return &def, s, true, nil
+			}
+
+			return &def, s, false, nil
 		}
-		return nil, s, fmt.Errorf("cannot parse column def type: %s", s)
+		return nil, s, false, fmt.Errorf("cannot parse column def type: %s", s)
 	}
-	return nil, s, fmt.Errorf("cannot parse column def name: %s", s)
+	return nil, s, false, fmt.Errorf("cannot parse column def name: %s", s)
 }
 
-func getColumnDefList(s string) ([]*CreateTableColumnDef, string, error) {
+func getColumnDefList(s string) ([]*CreateTableColumnDef, string, string, error) {
 	var l *Lexem
+	primaryKeyField := ""
 	defList := make([]*CreateTableColumnDef, 0)
 	for {
 		l, s = getComma(s)
 		if l != nil {
 			continue
 		}
-		// PRIMARY KEY must be there, Cassandra does not allow tables without it
+		// This marks the start of the PRIMARY KEY section, which may or may not be there
 		l, s = getKeyword(s, `(?i)(PRIMARY\s+KEY)`, false)
 		if l != nil {
 			break
 		}
 
+		l, s = getParenthesis(s, false)
+		if l != nil {
+			if l.V == ")" {
+				break
+			} else {
+				return nil, s, "", fmt.Errorf("cannot parse column def, unexpected open parenthesis: %s", s)
+			}
+		}
+
 		var def *CreateTableColumnDef
 		var err error
-		def, s, err = getColumnDef(s)
+		var isPrimaryKey bool
+		def, s, isPrimaryKey, err = getColumnDef(s)
 		if err != nil {
-			return nil, s, fmt.Errorf("cannot parse column def: %s,  %s", err.Error(), s)
+			return nil, s, "", fmt.Errorf("cannot parse column def: %s,  %s", err.Error(), s)
 		}
 		if def == nil {
-			return nil, s, fmt.Errorf("missing column def or missing PRIMARY KEY: %s", s)
+			return nil, s, "", fmt.Errorf("missing column def or missing PRIMARY KEY: %s", s)
+		}
+		if isPrimaryKey {
+			if primaryKeyField != "" {
+				return nil, s, "", fmt.Errorf("cannot have more than one field marked with PRIMARY KEY: %s", s)
+			}
+			primaryKeyField = def.Name
 		}
 		defList = append(defList, def)
 	}
-	return defList, s, nil
+	return defList, s, primaryKeyField, nil
 }
 
 func getPartitionAndClusteringKeys(s string) ([]string, []string, string, error) {
@@ -823,36 +853,36 @@ func getColumnSetExpressionLexems(s string) ([]*Lexem, string) {
 		if l != nil {
 			break
 		}
-		if l, s = getBoolLiteral(s); l != nil {
-			lexems = append(lexems, l)
-			continue
-		}
-		if l, s = getNull(s); l != nil {
-			lexems = append(lexems, l)
-			continue
-		}
-		if l, s = getStringLiteral(s); l != nil {
-			lexems = append(lexems, l)
-			continue
-		}
-		if len(lexems) == 0 || lexems[len(lexems)-1].V == "(" || lexems[len(lexems)-1].T == LexemArithmeticOp || lexems[len(lexems)-1].T == LexemLogicalOp {
+		if len(lexems) == 0 || lexems[len(lexems)-1].V == "(" || lexems[len(lexems)-1].T == LexemComma || lexems[len(lexems)-1].T == LexemArithmeticOp || lexems[len(lexems)-1].T == LexemLogicalOp {
 			// No arithmetic op allowed here
+			if l, s = getBoolLiteral(s); l != nil {
+				lexems = append(lexems, l)
+				continue
+			}
+			if l, s = getNull(s); l != nil {
+				lexems = append(lexems, l)
+				continue
+			}
+			if l, s = getStringLiteral(s); l != nil {
+				lexems = append(lexems, l)
+				continue
+			}
 			if l, s = getNumberLiteral(s); l != nil {
 				lexems = append(lexems, l)
 				continue
 			}
 		} else {
-			// No number literal allowed here
+			// No literal allowed here
 			if l, s = getArithmeticOp(s); l != nil {
 				lexems = append(lexems, l)
 				continue
 			}
+			if l, s = getLogicalOp(s); l != nil {
+				lexems = append(lexems, l)
+				continue
+			}
 		}
-		if l, s = getLogicalOp(s); l != nil {
-			lexems = append(lexems, l)
-			continue
-		}
-		if l, s = getParenthesis(s); l != nil {
+		if l, s = getParenthesis(s, true); l != nil {
 			lexems = append(lexems, l)
 			continue
 		}
@@ -1020,6 +1050,7 @@ func parseDropKeyspace(s string) (*CommandDropKeyspace, string, error) {
 func parseCreateTable(s string) (*CommandCreateTable, string, error) {
 	var l *Lexem
 	var err error
+	var primaryKeyField string
 	l, s = getKeyword(s, `(?i)CREATE\s+TABLE`, true)
 	if l == nil {
 		return nil, s, fmt.Errorf("expected CREATE TABLE: %s", s)
@@ -1046,21 +1077,25 @@ func parseCreateTable(s string) (*CommandCreateTable, string, error) {
 		return nil, s, fmt.Errorf("cannot parse column def list, ( expected: %s", s)
 	}
 
-	cmd.ColumnDefs, s, err = getColumnDefList(s)
+	cmd.ColumnDefs, s, primaryKeyField, err = getColumnDefList(s)
 	if err != nil {
 		return nil, s, err
 	}
 
-	l, s = getKeyword(s, `(?i)PRIMARY\s+KEY`, true)
-	if l == nil {
-		return nil, s, fmt.Errorf("expected PRIMARY KEY: %s", s)
-	}
+	if primaryKeyField == "" {
 
-	cmd.PartitionKeyColumns, cmd.ClusteringKeyColumns, s, err = getPartitionAndClusteringKeys(s)
-	if err != nil {
-		return nil, s, err
-	}
+		l, s = getKeyword(s, `(?i)PRIMARY\s+KEY`, true)
+		if l == nil {
+			return nil, s, fmt.Errorf("expected PRIMARY KEY: %s", s)
+		}
 
+		cmd.PartitionKeyColumns, cmd.ClusteringKeyColumns, s, err = getPartitionAndClusteringKeys(s)
+		if err != nil {
+			return nil, s, err
+		}
+	} else {
+		cmd.PartitionKeyColumns = []string{primaryKeyField}
+	}
 	l, s = getKeyword(s, `\)`, true)
 	if l == nil {
 		return nil, s, fmt.Errorf("cannot parse column def list, ) expected: %s", s)

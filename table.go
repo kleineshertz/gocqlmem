@@ -489,10 +489,13 @@ func (t *Table) execSelect(cmd *CommandSelect) ([]string, [][]any, error) {
 	valMap := eval.VarValuesMap{}
 	valMap[""] = map[string]any{}
 	valMap[cmd.TableName] = map[string]any{}
-	// In Apache Cassandra, if you use an aggregate function (like SUM, AVG, COUNT, MAX, MIN) and select other non-aggregated columns in the same query, Cassandra returns the first row it encounters for those non-aggregated columns.
+	// In Apache Cassandra, if you use an aggregate function (like SUM, AVG, COUNT, MAX, MIN) and select other non-aggregated columns in the same query,
+	// Cassandra returns the first row it encounters for those non-aggregated columns. So, use isFirstHitAlreadyPassed.
 	var isFirstHitAlreadyPassed bool
 	for _, i := range selectSeq {
 		resultRow := []any{}
+		clear(valMap[""])
+		clear(valMap[cmd.TableName])
 		for colIdx, colDef := range t.ColumnDefs {
 			valMap[""][colDef.Name] = t.ColumnValues[colIdx][i]
 			valMap[cmd.TableName][colDef.Name] = t.ColumnValues[colIdx][i]
@@ -504,7 +507,7 @@ func (t *Table) execSelect(cmd *CommandSelect) ([]string, [][]any, error) {
 			eCtx := eval.NewPlainEvalCtx(eval_gocqlmem.GocqlmemEvalFunctions, eval_gocqlmem.GocqlmemEvalConstants, valMap)
 			isIncludeAny, err := eCtx.Eval(cmd.WhereExpAst)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, fmt.Errorf("cannot evaluate where expression: %s", err.Error())
 			}
 
 			isInclude, ok = isIncludeAny.(bool)
@@ -517,7 +520,7 @@ func (t *Table) execSelect(cmd *CommandSelect) ([]string, [][]any, error) {
 			for resultColIdx, selectExpAst := range resultExps {
 				var val any
 				var err error
-				if aggCtxs[resultColIdx].IsAggFuncEnabled() || !isFirstHitAlreadyPassed {
+				if isAgg && (aggCtxs[resultColIdx].IsAggFuncEnabled() || !isFirstHitAlreadyPassed) || !isAgg {
 					aggCtxs[resultColIdx].SetVars(valMap)
 					val, err = aggCtxs[resultColIdx].Eval(selectExpAst)
 					if err != nil {
@@ -655,6 +658,23 @@ func getInsertedPriKeyValuesFromWhereClause(tableName string, columnDefs []*Colu
 	return colValueMap, nil
 }
 
+func calcValuesToUpdate(cmd *CommandUpdate, columnDefs []*ColumnDef, columnDefMap map[string]int, valMap eval.VarValuesMap) (map[string]any, error) {
+	var err error
+	updatedNonKeyColValues := map[string]any{}
+	for i, colSetExp := range cmd.ColumnSetExpressions {
+		eCtx := eval.NewPlainEvalCtx(eval_gocqlmem.GocqlmemEvalFunctions, eval_gocqlmem.GocqlmemEvalConstants, valMap)
+		updatedNonKeyColValues[colSetExp.Name], err = eCtx.Eval(cmd.ColumnSetExpAsts[i])
+		if err != nil {
+			return nil, fmt.Errorf("cannot calculate updated column %d: %s", i, err.Error())
+		}
+		updatedNonKeyColValues[colSetExp.Name], err = eval_gocqlmem.CastToInternalType(updatedNonKeyColValues[colSetExp.Name], columnDefs[columnDefMap[colSetExp.Name]].DataType)
+		if err != nil {
+			return nil, fmt.Errorf("cannot cast updated column %d: %s", i, err.Error())
+		}
+	}
+	return updatedNonKeyColValues, nil
+}
+
 func (t *Table) execUpdate(cmd *CommandUpdate) (bool, error) {
 	t.Lock.Lock()
 	defer t.Lock.Unlock()
@@ -670,18 +690,6 @@ func (t *Table) execUpdate(cmd *CommandUpdate) (bool, error) {
 	}
 
 	var err error
-	updatedNonKeyColValues := map[string]any{}
-	for i, colSetExp := range cmd.ColumnSetExpressions {
-		eCtx := eval.NewPlainEvalCtx(eval_gocqlmem.GocqlmemEvalFunctions, eval_gocqlmem.GocqlmemEvalConstants, nil)
-		updatedNonKeyColValues[colSetExp.Name], err = eCtx.Eval(cmd.ColumnSetExpAsts[i])
-		if err != nil {
-			return false, fmt.Errorf("cannot calculate updated column %d: %s", i, err.Error())
-		}
-		updatedNonKeyColValues[colSetExp.Name], err = eval_gocqlmem.CastToInternalType(updatedNonKeyColValues[colSetExp.Name], t.ColumnDefs[t.ColumnDefMap[colSetExp.Name]].DataType)
-		if err != nil {
-			return false, fmt.Errorf("cannot cast updated column %d: %s", i, err.Error())
-		}
-	}
 
 	valMap := eval.VarValuesMap{}
 	valMap[""] = map[string]any{}
@@ -689,6 +697,7 @@ func (t *Table) execUpdate(cmd *CommandUpdate) (bool, error) {
 	var isAlreadyExists bool
 	for i := range len(t.ColumnValues[0]) {
 		clear(valMap[""])
+		clear(valMap[cmd.TableName])
 		for colIdx, colDef := range t.ColumnDefs {
 			valMap[""][colDef.Name] = t.ColumnValues[colIdx][i]
 			valMap[cmd.TableName][colDef.Name] = t.ColumnValues[colIdx][i]
@@ -707,7 +716,16 @@ func (t *Table) execUpdate(cmd *CommandUpdate) (bool, error) {
 
 		if isUpdate {
 			isAlreadyExists = true
+
 			for _, colSetExp := range cmd.ColumnSetExpressions {
+
+				// We cannot calculate values in advance: b = b + 1 expressions are allowed, so do it here
+				updatedNonKeyColValues, err := calcValuesToUpdate(cmd, t.ColumnDefs, t.ColumnDefMap, valMap)
+				if err != nil {
+					return false, fmt.Errorf("cannot calculate update value: %s", err.Error())
+
+				}
+
 				colDefIdx, ok := t.ColumnDefMap[colSetExp.Name]
 				if !ok {
 					return false, fmt.Errorf("cannot update column %s, it is not in the table definition", colSetExp.Name)
@@ -741,8 +759,23 @@ func (t *Table) execUpdate(cmd *CommandUpdate) (bool, error) {
 		return false, err
 	}
 
+	// Prepare all values, we do not need any existing column data here, but take care of NULL "count" fields
+	clear(valMap[""])
+	clear(valMap[cmd.TableName])
+	for _, colDef := range t.ColumnDefs {
+		if colDef.DataType == eval_gocqlmem.DataTypeCounter {
+			valMap[""][colDef.Name] = int64(0)
+			valMap[cmd.TableName][colDef.Name] = int64(0)
+		}
+	}
+
+	insertedNonKeyColValues, err := calcValuesToUpdate(cmd, t.ColumnDefs, t.ColumnDefMap, valMap)
+	if err != nil {
+		return false, fmt.Errorf("cannot calculate insert value: %s", err.Error())
+	}
+
 	// Add non-primary columns to the map
-	for colName, val := range updatedNonKeyColValues {
+	for colName, val := range insertedNonKeyColValues {
 		allInsertedColValues[colName] = val
 	}
 

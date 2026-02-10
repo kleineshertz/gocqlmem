@@ -90,7 +90,7 @@ func IsValidDataType(s string) bool {
 
 func CastToInternalType(val any, cqlType DataType) (any, error) {
 	switch cqlType {
-	case DataTypeInt, DataTypeBigint, DataTypeTinyint, DataTypeSmallint:
+	case DataTypeInt, DataTypeBigint, DataTypeTinyint, DataTypeSmallint, DataTypeCounter:
 		return eval.CastToInt64(val)
 
 	case DataTypeDouble, DataTypeFloat:
