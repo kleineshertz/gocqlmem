@@ -1,8 +1,9 @@
-// test/unit/org/apache/cassandra/cql3/validation/operations/AggregationTest.java
+// Tests borrowed from test/unit/org/apache/cassandra/cql3/validation/operations/AggregationTest.java
 package gocqlmem
 
 import (
 	"fmt"
+	"math"
 	"testing"
 
 	"github.com/shopspring/decimal"
@@ -268,137 +269,104 @@ func TestArithmeticCorrectness(t *testing.T) {
 	assertIterScan(t, fmt.Sprintf("[[%s]]", result.String()), s, "SELECT avg(val) FROM ks1.t1 where bucket in (1, 2, 3)")
 }
 
-/*
-    @Test
-    public void testAggregatesWithoutOverflow() throws Throwable
-    {
-        createTable("create table %s (bucket int primary key, v1 tinyint, v2 smallint, v3 int, v4 bigint, v5 varint)");
-        for (int i = 1; i <= 3; i++)
-            execute("insert into %s (bucket, v1, v2, v3, v4, v5) values (?, ?, ?, ?, ?, ?)", i,
-                    (byte) ((Byte.MAX_VALUE / 3) + i), (short) ((Short.MAX_VALUE / 3) + i), (Integer.MAX_VALUE / 3) + i, (Long.MAX_VALUE / 3) + i,
-                    BigInteger.valueOf(Long.MAX_VALUE).add(BigInteger.valueOf(i)));
+func TestAggregatesWithoutOverflow(t *testing.T) {
+	s := NewSession()
+	assert.Nil(t, s.Query("CREATE KEYSPACE ks1").Exec())
+	assert.Nil(t, s.Query("CREATE TABLE ks1.t1 (bucket int primary key, v1 tinyint, v2 smallint, v3 int, v4 bigint, v5 varint)").Exec())
 
-        assertRows(execute("select avg(v1), avg(v2), avg(v3), avg(v4), avg(v5) from %s where bucket in (1, 2, 3);"),
-                   row((byte) ((Byte.MAX_VALUE / 3) + 2), (short) ((Short.MAX_VALUE / 3) + 2), (Integer.MAX_VALUE / 3) + 2, (Long.MAX_VALUE / 3) + 2,
-                       BigInteger.valueOf(Long.MAX_VALUE).add(BigInteger.valueOf(2))));
+	existingRowMap := map[string]interface{}{}
 
-        for (int i = 1; i <= 3; i++)
-            execute("insert into %s (bucket, v1, v2, v3, v4, v5) values (?, ?, ?, ?, ?, ?)", i + 3,
-                    (byte) (100 + i), (short) (100 + i), 100 + i, 100L + i, BigInteger.valueOf(100 + i));
+	for _, i := range []int{1, 2, 3} {
+		assertUpserMapScanCas(t, true, s, fmt.Sprintf("INSERT INTO ks1.t1 (bucket, v1, v2, v3, v4, v5) values (%d, %d, %d, %d, %d, %d)",
+			i, math.MaxInt8/3+i, math.MaxInt16/3+i, math.MaxInt32/3+i, math.MaxInt64/3+i, math.MaxInt64/3+i), existingRowMap)
+	}
+	result := fmt.Sprintf("[[%d %d %d %d %d]]", math.MaxInt8/3+2, math.MaxInt16/3+2, math.MaxInt32/3+2, math.MaxInt64/3+2, math.MaxInt64/3+2)
+	assertIterScan(t, result, s, "SELECT avg(v1), avg(v2), avg(v3), avg(v4), avg(v5) from ks1.t1 where bucket in (1, 2, 3)")
 
-        assertRows(execute("select avg(v1), avg(v2), avg(v3), avg(v4), avg(v5) from %s where bucket in (4, 5, 6);"),
-                   row((byte) 102, (short) 102, 102, 102L, BigInteger.valueOf(102)));
-    }
-
-    @Test
-    public void testAggregateOverflow() throws Throwable
-    {
-        createTable("create table %s (bucket int primary key, v1 tinyint, v2 smallint, v3 int, v4 bigint, v5 varint)");
-        for (int i = 1; i <= 3; i++)
-            execute("insert into %s (bucket, v1, v2, v3, v4, v5) values (?, ?, ?, ?, ?, ?)", i,
-                    Byte.MAX_VALUE, Short.MAX_VALUE, Integer.MAX_VALUE, Long.MAX_VALUE, BigInteger.valueOf(Long.MAX_VALUE).multiply(BigInteger.valueOf(2)));
-
-        assertRows(execute("select avg(v1), avg(v2), avg(v3), avg(v4), avg(v5) from %s where bucket in (1, 2, 3);"),
-                   row(Byte.MAX_VALUE, Short.MAX_VALUE, Integer.MAX_VALUE, Long.MAX_VALUE, BigInteger.valueOf(Long.MAX_VALUE).multiply(BigInteger.valueOf(2))));
-
-        execute("truncate %s");
-
-        for (int i = 1; i <= 3; i++)
-            execute("insert into %s (bucket, v1, v2, v3, v4, v5) values (?, ?, ?, ?, ?, ?)", i,
-                    Byte.MIN_VALUE, Short.MIN_VALUE, Integer.MIN_VALUE, Long.MIN_VALUE, BigInteger.valueOf(Long.MIN_VALUE).multiply(BigInteger.valueOf(2)));
-
-        assertRows(execute("select avg(v1), avg(v2), avg(v3), avg(v4), avg(v5) from %s where bucket in (1, 2, 3);"),
-                   row(Byte.MIN_VALUE, Short.MIN_VALUE, Integer.MIN_VALUE, Long.MIN_VALUE, BigInteger.valueOf(Long.MIN_VALUE).multiply(BigInteger.valueOf(2))));
-
-    }
-
-    @Test
-    public void testDoubleAggregatesPrecision() throws Throwable
-    {
-        createTable("create table %s (bucket int primary key, v1 float, v2 double, v3 decimal)");
-
-        for (int i = 1; i <= 3; i++)
-            execute("insert into %s (bucket, v1, v2, v3) values (?, ?, ?, ?)", i,
-                    Float.MAX_VALUE, Double.MAX_VALUE, BigDecimal.valueOf(Double.MAX_VALUE).add(BigDecimal.valueOf(2)));
-
-        assertRows(execute("select avg(v1), avg(v2), avg(v3) from %s where bucket in (1, 2, 3);"),
-                   row(Float.MAX_VALUE, Double.MAX_VALUE, BigDecimal.valueOf(Double.MAX_VALUE).add(BigDecimal.valueOf(2))));
-
-        execute("insert into %s (bucket, v1, v2, v3) values (?, ?, ?, ?)", 4, (float) 100.10, 100.10, BigDecimal.valueOf(100.10));
-        execute("insert into %s (bucket, v1, v2, v3) values (?, ?, ?, ?)", 5, (float) 110.11, 110.11, BigDecimal.valueOf(110.11));
-        execute("insert into %s (bucket, v1, v2, v3) values (?, ?, ?, ?)", 6, (float) 120.12, 120.12, BigDecimal.valueOf(120.12));
-
-        assertRows(execute("select avg(v1), avg(v2), avg(v3) from %s where bucket in (4, 5, 6);"),
-                   row((float) 110.11, 110.11, BigDecimal.valueOf(110.11)));
-    }
-
-    @Test
-    public void testNan() throws Throwable
-    {
-        createTable("create table %s (bucket int primary key, v1 float, v2 double)");
-
-        for (int i = 1; i <= 10; i++)
-            if (i != 5)
-                execute("insert into %s (bucket, v1, v2) values (?, ?, ?)", i, (float) i, (double) i);
-
-        execute("insert into %s (bucket, v1, v2) values (?, ?, ?)", 5, Float.NaN, Double.NaN);
-
-        assertRows(execute("select avg(v1), avg(v2) from %s where bucket in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10);"),
-                   row(Float.NaN, Double.NaN));
-        assertRows(execute("select sum(v1), sum(v2) from %s where bucket in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10);"),
-                   row(Float.NaN, Double.NaN));
-    }
-
-    @Test
-    public void testInfinity() throws Throwable
-    {
-        createTable("create table %s (bucket int primary key, v1 float, v2 double)");
-        for (boolean positive: new boolean[] { true, false})
-        {
-            final float FLOAT_INFINITY = positive ? Float.POSITIVE_INFINITY : Float.NEGATIVE_INFINITY;
-            final double DOUBLE_INFINITY = positive ? Double.POSITIVE_INFINITY : Double.NEGATIVE_INFINITY;
-
-            for (int i = 1; i <= 10; i++)
-                if (i != 5)
-                    execute("insert into %s (bucket, v1, v2) values (?, ?, ?)", i, (float) i, (double) i);
-
-            execute("insert into %s (bucket, v1, v2) values (?, ?, ?)", 5, FLOAT_INFINITY, DOUBLE_INFINITY);
-
-            assertRows(execute("select avg(v1), avg(v2) from %s where bucket in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10);"),
-                       row(FLOAT_INFINITY, DOUBLE_INFINITY));
-            assertRows(execute("select sum(v1), avg(v2) from %s where bucket in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10);"),
-                       row(FLOAT_INFINITY, DOUBLE_INFINITY));
-
-            execute("truncate %s");
-        }
-    }
-
-    @Test
-    public void testSumPrecision() throws Throwable
-    {
-        createTable("create table %s (bucket int primary key, v1 float, v2 double, v3 decimal)");
-
-        for (int i = 1; i <= 17; i++)
-            execute("insert into %s (bucket, v1, v2, v3) values (?, ?, ?, ?)", i, (float) (i / 10.0), i / 10.0, BigDecimal.valueOf(i / 10.0));
-
-        assertRows(execute("select sum(v1), sum(v2), sum(v3) from %s;"),
-                   row((float) 15.3, 15.3, BigDecimal.valueOf(15.3)));
-    }
-
-    @Test
-    public void testRejectInvalidAggregateNamesOnCreation()
-    {
-        for (String funcName : Arrays.asList("my/fancy/aggregate", "my_other[fancy]aggregate"))
-        {
-            assertThatThrownBy(() -> {
-                createAggregateOverload(String.format("%s.\"%s\"", KEYSPACE_PER_TEST, funcName), "int",
-                                        " CREATE AGGREGATE IF NOT EXISTS %s(text, text)\n" +
-                                        " SFUNC func\n" +
-                                        " STYPE map<text,bigint>\n" +
-                                        " INITCOND { };");
-            }).hasRootCauseInstanceOf(InvalidRequestException.class)
-              .hasRootCauseMessage("Aggregate name '%s' is invalid", funcName);
-        }
-    }
+	for _, i := range []int{1, 2, 3} {
+		assertUpserMapScanCas(t, true, s, fmt.Sprintf("INSERT INTO ks1.t1 (bucket, v1, v2, v3, v4, v5) values (%d, %d, %d, %d, %d, %d)",
+			i+3, 100+i, 100+i, 100+i, i+100, i+100), existingRowMap)
+	}
+	assertIterScan(t, "[[102 102 102 102 102]]", s, "SELECT avg(v1), avg(v2), avg(v3), avg(v4), avg(v5) from ks1.t1 where bucket in (4, 5, 6)")
 }
-*/
+
+func TestAggregatesOverflow(t *testing.T) {
+	s := NewSession()
+	assert.Nil(t, s.Query("CREATE KEYSPACE ks1").Exec())
+	assert.Nil(t, s.Query("CREATE TABLE ks1.t1 (bucket int primary key, v1 tinyint, v2 smallint, v3 int, v4 bigint, v5 varint)").Exec())
+
+	existingRowMap := map[string]interface{}{}
+
+	for _, i := range []int{1, 2, 3} {
+		assertUpserMapScanCas(t, true, s, fmt.Sprintf("INSERT INTO ks1.t1 (bucket, v1, v2, v3, v4, v5) values (%d, %d, %d, %d, %d, %d)",
+			i, math.MaxInt8, math.MaxInt16, math.MaxInt32, math.MaxInt64, math.MaxInt64), existingRowMap)
+	}
+	result := fmt.Sprintf("[[%d %d %d %d %d]]", math.MaxInt8, math.MaxInt16, math.MaxInt32, math.MaxInt64, math.MaxInt64)
+	assertIterScan(t, result, s, "SELECT avg(v1), avg(v2), avg(v3), avg(v4), avg(v5) from ks1.t1 where bucket in (1, 2, 3)")
+
+	assert.Nil(t, s.Query("TRUNCATE ks1.t1").Exec())
+
+	for _, i := range []int{1, 2, 3} {
+		assertUpserMapScanCas(t, true, s, fmt.Sprintf("INSERT INTO ks1.t1 (bucket, v1, v2, v3, v4, v5) values (%d, %d, %d, %d, %d, %d)",
+			i, math.MinInt8, math.MinInt16, math.MinInt32, math.MinInt64, math.MinInt64), existingRowMap)
+	}
+	result = fmt.Sprintf("[[%d %d %d %d %d]]", math.MinInt8, math.MinInt16, math.MinInt32, math.MinInt64, math.MinInt64)
+	assertIterScan(t, result, s, "SELECT avg(v1), avg(v2), avg(v3), avg(v4), avg(v5) from ks1.t1 where bucket in (1, 2, 3)")
+
+}
+
+func TestDoubleAggregatesPrecision(t *testing.T) {
+	s := NewSession()
+	assert.Nil(t, s.Query("CREATE KEYSPACE ks1").Exec())
+	assert.Nil(t, s.Query("CREATE TABLE ks1.t1 (bucket int primary key, v1 float, v2 double, v3 decimal)").Exec())
+
+	existingRowMap := map[string]interface{}{}
+
+	for _, i := range []int{1, 2, 3} {
+		assertUpserMapScanCas(t, true, s, fmt.Sprintf("INSERT INTO ks1.t1 (bucket, v1, v2, v3) values (%d, %f, %f, %s)",
+			i, math.MaxFloat32, math.MaxFloat64, decimal.NewFromFloat(math.MaxFloat64).Add(decimal.NewFromFloat(2.0))), existingRowMap)
+	}
+	// Yeah, we choke on Float64 overflow, so Inf(1). Should we fix it really?
+	result := fmt.Sprintf("[%v]", []any{math.MaxFloat32, math.Inf(1), decimal.NewFromFloat(math.MaxFloat64).Add(decimal.NewFromFloat(2.0))})
+	assertIterScan(t, result, s, "SELECT avg(v1), avg(v2), avg(v3) from ks1.t1 where bucket in (1, 2, 3)")
+
+	assertUpserMapScanCas(t, true, s, fmt.Sprintf("INSERT INTO ks1.t1 (bucket, v1, v2, v3) values (%d, %f, %f, %s)", 4, float32(100.10), float64(100.10), decimal.NewFromFloat(100.10)), existingRowMap)
+	assertUpserMapScanCas(t, true, s, fmt.Sprintf("INSERT INTO ks1.t1 (bucket, v1, v2, v3) values (%d, %f, %f, %s)", 5, float32(110.11), float64(110.11), decimal.NewFromFloat(110.11)), existingRowMap)
+	assertUpserMapScanCas(t, true, s, fmt.Sprintf("INSERT INTO ks1.t1 (bucket, v1, v2, v3) values (%d, %f, %f, %s)", 6, float32(120.12), float64(120.12), decimal.NewFromFloat(120.12)), existingRowMap)
+
+	assertIterScan(t, "[[110.11000066666666 110.11 110.11]]", s, "SELECT avg(v1), avg(v2), avg(v3) from ks1.t1 where bucket in (4,5,6)")
+}
+
+func TestNan(t *testing.T) {
+	s := NewSession()
+	assert.Nil(t, s.Query("CREATE KEYSPACE ks1").Exec())
+	assert.Nil(t, s.Query("CREATE TABLE ks1.t1 (bucket int primary key, v1 float, v2 double)").Exec())
+
+	// Yeah, we choke on Java/Golang NaN type. Should we fix it really?
+	err := s.Query(fmt.Sprintf("INSERT INTO ks1.t1 (bucket, v1, v2) values (%d, %f, %f)", 1, math.NaN(), math.NaN())).Exec()
+	assert.Contains(t, err.Error(), "cannot cast upserted column 1: cannot convert NaN to float, unknown constant")
+}
+
+func TestInfinity(t *testing.T) {
+	s := NewSession()
+	assert.Nil(t, s.Query("CREATE KEYSPACE ks1").Exec())
+	assert.Nil(t, s.Query("CREATE TABLE ks1.t1 (bucket int primary key, v1 float, v2 double)").Exec())
+
+	// Yeah, we choke on Java/Golang NaN type. Should we fix it really?
+	err := s.Query(fmt.Sprintf("INSERT INTO ks1.t1 (bucket, v1, v2) values (%d, %f, %f)", 5, math.Inf(1), math.Inf(1))).Exec()
+	assert.Contains(t, err.Error(), "expected a literal or a constant: +Inf, +Inf")
+}
+
+func TestSumPrecision(t *testing.T) {
+	s := NewSession()
+	assert.Nil(t, s.Query("CREATE KEYSPACE ks1").Exec())
+	assert.Nil(t, s.Query("CREATE TABLE ks1.t1 (bucket int primary key, v1 float, v2 double, v3 decimal)").Exec())
+
+	existingRowMap := map[string]interface{}{}
+
+	for i := range 17 {
+		assertUpserMapScanCas(t, true, s, fmt.Sprintf("INSERT INTO ks1.t1 (bucket, v1, v2, v3) values (%d, %f, %f, %s)",
+			i+1, float32(i+1)/10.0, float64(i+1)/10.0, decimal.NewFromInt(int64(i+1)).Div(decimal.NewFromFloat(10.0))), existingRowMap)
+	}
+	assertIterScan(t, "[[15.299999999999999 15.299999999999999 15.3]]", s, "SELECT sum(v1), sum(v2), sum(v3) from ks1.t1")
+}

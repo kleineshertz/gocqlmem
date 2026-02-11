@@ -69,6 +69,18 @@ func (s *Session) createTable(cmd *CommandCreateTable) error {
 	return ks.createTable(cmd)
 }
 
+func (s *Session) truncateTable(cmd *CommandTruncateTable) error {
+	s.Lock.RLock()
+
+	ks, ksExists := s.KeyspaceMap[cmd.GetCtxKeyspace()]
+	s.Lock.RUnlock()
+	if !ksExists {
+		return fmt.Errorf("keyspace %s does not exist", cmd.GetCtxKeyspace())
+	}
+
+	return ks.truncateTable(cmd)
+}
+
 func (s *Session) dropTable(cmd *CommandDropTable) error {
 	s.Lock.RLock()
 
@@ -686,6 +698,8 @@ func (q *Query) Iter() *Iter {
 		return &Iter{err: q.session.dropKeyspace(cmd)}
 	case *CommandCreateTable:
 		return &Iter{err: q.session.createTable(cmd)}
+	case *CommandTruncateTable:
+		return &Iter{err: q.session.truncateTable(cmd)}
 	case *CommandDropTable:
 		return &Iter{err: q.session.dropTable(cmd)}
 	case *CommandInsert:

@@ -131,6 +131,18 @@ func (c *CommandCreateTable) SetCtxKeyspace(keyspace string) {
 	c.CtxKeyspace = keyspace
 }
 
+type CommandTruncateTable struct {
+	CtxKeyspace string
+	TableName   string
+}
+
+func (c *CommandTruncateTable) GetCtxKeyspace() string {
+	return c.CtxKeyspace
+}
+func (c *CommandTruncateTable) SetCtxKeyspace(keyspace string) {
+	c.CtxKeyspace = keyspace
+}
+
 type CommandDropTable struct {
 	CtxKeyspace string
 	IfExists    bool
@@ -1199,6 +1211,28 @@ func parseCreateTable(s string) (*CommandCreateTable, string, error) {
 	return &cmd, s, nil
 }
 
+func parseTruncateTable(s string) (*CommandTruncateTable, string, error) {
+	var l *Lexem
+	l, s = getKeyword(s, `(?i)TRUNCATE`, true)
+	if l == nil {
+		return nil, s, fmt.Errorf("expected TRUNCATE: %s", s)
+	}
+	cmd := CommandTruncateTable{}
+	l, s = getIdentOrPointedIdent(s)
+	if l == nil {
+		return nil, s, fmt.Errorf("expected table name ident: %s", s)
+	}
+	if l.T == LexemPointedIdent {
+		ksTable := strings.Split(l.V, ".")
+		cmd.CtxKeyspace = ksTable[0]
+		cmd.TableName = ksTable[1]
+	} else {
+		cmd.TableName = l.V
+	}
+
+	return &cmd, s, nil
+}
+
 func parseDropTable(s string) (*CommandDropTable, string, error) {
 	var l *Lexem
 	l, s = getKeyword(s, `(?i)DROP\s+TABLE`, true)
@@ -1424,7 +1458,11 @@ func parseInsert(s string) (*CommandInsert, string, error) {
 			cmd.ColumnValues = append(cmd.ColumnValues, l)
 			continue
 		}
-		return nil, s, fmt.Errorf("expected  a literal: %s", s)
+		if l, s = getIdentOrPointedIdent(s); l != nil {
+			cmd.ColumnValues = append(cmd.ColumnValues, l)
+			continue
+		}
+		return nil, s, fmt.Errorf("expected a literal or a constant: %s", s)
 	}
 	l, s = getKeyword(s, `\)`, true)
 	if l == nil {
@@ -1445,7 +1483,7 @@ func parseInsert(s string) (*CommandInsert, string, error) {
 	}
 
 	for _, colValue := range cmd.ColumnValues {
-		if colValue.T != LexemStringLiteral && colValue.T != LexemNumberLiteral && colValue.T != LexemBoolLiteral && colValue.T != LexemNull {
+		if colValue.T != LexemStringLiteral && colValue.T != LexemNumberLiteral && colValue.T != LexemBoolLiteral && colValue.T != LexemNull && colValue.T != LexemIdent && colValue.T != LexemPointedIdent {
 			return nil, s, fmt.Errorf("insert value list can contain only number, string, bool literals, got %s", colValue.V)
 		}
 	}
@@ -1588,7 +1626,7 @@ func ParseCommands(s string) ([]Command, error) {
 		if s == "" {
 			break
 		}
-		l, s = getKeyword(s, `(?i)(CREATE\s+KEYSPACE|USE|DROP\s+KEYSPACE|CREATE\s+TABLE|DROP\s+TABLE|SELECT|INSERT\s+INTO|UPDATE|DELETE)`, false)
+		l, s = getKeyword(s, `(?i)(CREATE\s+KEYSPACE|USE|DROP\s+KEYSPACE|CREATE\s+TABLE|TRUNCATE|DROP\s+TABLE|SELECT|INSERT\s+INTO|UPDATE|DELETE)`, false)
 		if l != nil {
 			var cmd Command
 			var err error
@@ -1612,6 +1650,11 @@ func ParseCommands(s string) ([]Command, error) {
 				cmd, s, err = parseCreateTable(s)
 				if err != nil {
 					return nil, fmt.Errorf("cannot parse CREATE TABLE: %s", err.Error())
+				}
+			case "TRUNCATE":
+				cmd, s, err = parseTruncateTable(s)
+				if err != nil {
+					return nil, fmt.Errorf("cannot parse TRUNCATE: %s", err.Error())
 				}
 			case "DROP TABLE":
 				cmd, s, err = parseDropTable(s)
@@ -1655,7 +1698,7 @@ func ParseCommands(s string) ([]Command, error) {
 			curKs = cmdUseKeyspace.GetCtxKeyspace()
 		} else {
 			switch cmds[i].(type) {
-			case *CommandCreateTable, *CommandDropTable, *CommandSelect, *CommandInsert, *CommandUpdate, *CommandDelete:
+			case *CommandCreateTable, *CommandTruncateTable, *CommandDropTable, *CommandSelect, *CommandInsert, *CommandUpdate, *CommandDelete:
 				localCtxKs := cmds[i].GetCtxKeyspace()
 				if localCtxKs == "" {
 					if curKs == "" {

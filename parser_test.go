@@ -128,6 +128,19 @@ func TestCreateTable(t *testing.T) {
 	assert.Contains(t, err.Error(), "clustering key f1 duplication")
 }
 
+func TestTruncateTable(t *testing.T) {
+	cmds, err := ParseCommands(`USE ks1;TRUNCATE t1;TRUNCATE ks2.t1`)
+	assert.Nil(t, err)
+	cmd, ok := cmds[1].(*CommandTruncateTable)
+	assert.True(t, ok)
+	assert.Equal(t, "ks1", cmd.CtxKeyspace)
+	assert.Equal(t, "t1", cmd.TableName)
+	cmd, ok = cmds[2].(*CommandTruncateTable)
+	assert.True(t, ok)
+	assert.Equal(t, "ks2", cmd.CtxKeyspace)
+	assert.Equal(t, "t1", cmd.TableName)
+}
+
 func TestDropTable(t *testing.T) {
 	cmds, err := ParseCommands(`USE ks1;DROP TABLE IF EXISTS t1;DROP TABLE ks2.t1`)
 	assert.Nil(t, err)

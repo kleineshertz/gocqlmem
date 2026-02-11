@@ -37,6 +37,18 @@ func (ks *Keyspace) createTable(cmd *CommandCreateTable) error {
 	return nil
 }
 
+func (ks *Keyspace) truncateTable(cmd *CommandTruncateTable) error {
+	ks.Lock.RLock()
+	defer ks.Lock.RUnlock()
+
+	t, alreadyExists := ks.TableMap[cmd.TableName]
+	if !alreadyExists {
+		return fmt.Errorf("cannot truncate table %s, it was not found", cmd.TableName)
+	}
+
+	return t.execTruncate(cmd)
+}
+
 func (ks *Keyspace) dropTable(cmd *CommandDropTable) error {
 	ks.Lock.Lock()
 	defer ks.Lock.Unlock()

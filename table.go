@@ -203,18 +203,40 @@ func convertLexemToInternalType(lexem *Lexem, cqlType eval_gocqlmem.DataType) (a
 		return nil, nil
 	}
 	switch cqlType {
-	case eval_gocqlmem.DataTypeBigint, eval_gocqlmem.DataTypeInt, eval_gocqlmem.DataTypeTinyint, eval_gocqlmem.DataTypeSmallint:
-		if lexem.T != LexemNumberLiteral {
+	case eval_gocqlmem.DataTypeBigint, eval_gocqlmem.DataTypeInt, eval_gocqlmem.DataTypeTinyint, eval_gocqlmem.DataTypeSmallint, eval_gocqlmem.DataTypeVarint:
+		if lexem.T == LexemIdent || lexem.T == LexemPointedIdent {
+			constVal, ok := eval_gocqlmem.GocqlmemEvalConstants[lexem.V]
+			if !ok {
+				return 0, fmt.Errorf("cannot convert %v to integer, unknown constant", lexem.V)
+			}
+			intVal, ok := constVal.(int64)
+			if !ok {
+				return 0, fmt.Errorf("cannot convert %v to integer, the constant is not of int64 type", lexem.V)
+			}
+			return intVal, nil
+
+		} else if lexem.T != LexemNumberLiteral {
 			return 0, fmt.Errorf("cannot convert %v to integer, lexem type %d not supported", lexem.V, lexem.T)
 		}
-		val, err := strconv.Atoi(lexem.V)
+		val, err := strconv.ParseInt(lexem.V, 10, 64)
 		if err != nil {
 			return 0, fmt.Errorf("cannot convert %v to integer: %s", lexem.V, err.Error())
 		}
-		return int64(val), nil
+		return val, nil
 
 	case eval_gocqlmem.DataTypeDouble, eval_gocqlmem.DataTypeFloat:
-		if lexem.T != LexemNumberLiteral {
+		if lexem.T == LexemIdent || lexem.T == LexemPointedIdent {
+			constVal, ok := eval_gocqlmem.GocqlmemEvalConstants[lexem.V]
+			if !ok {
+				return 0, fmt.Errorf("cannot convert %v to float, unknown constant", lexem.V)
+			}
+			floatVal, ok := constVal.(float64)
+			if !ok {
+				return 0, fmt.Errorf("cannot convert %v to float, the constant is not of float64 type", lexem.V)
+			}
+			return floatVal, nil
+
+		} else if lexem.T != LexemNumberLiteral {
 			return 0, fmt.Errorf("cannot convert %v to float, lexem type %d not supported", lexem.V, lexem.T)
 		}
 		val, err := strconv.ParseFloat(lexem.V, 64)
@@ -359,6 +381,16 @@ func (t *Table) execInternalUpsert(cmd *CommandInsert, insertedColumnValues map[
 		}
 	}
 	return true, nil
+}
+
+func (t *Table) execTruncate(cmd *CommandTruncateTable) error {
+	t.Lock.Lock()
+	defer t.Lock.Unlock()
+
+	for i := range len(t.ColumnValues) {
+		t.ColumnValues[i] = t.ColumnValues[i][:0]
+	}
+	return nil
 }
 
 func (t *Table) execInsert(cmd *CommandInsert) (bool, error) {
