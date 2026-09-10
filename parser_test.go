@@ -390,7 +390,7 @@ func TestUpdate(t *testing.T) {
 }
 
 func TestDelete(t *testing.T) {
-	cmds, err := ParseCommands(`USE ks1;DELETE t1.col1 FROM t1 WHERE f1 = NULL IF EXISTS;DELETE FROM ks2.t1`, nil)
+	cmds, err := ParseCommands(`USE ks1;DELETE t1.col1 FROM t1 WHERE f1 = NULL OR f1 IN ('aaa') IF EXISTS;DELETE FROM ks2.t1`, nil)
 	assert.Nil(t, err)
 	cmd, ok := cmds[1].(*CommandDelete)
 	assert.True(t, ok)

@@ -2198,8 +2198,18 @@ func parseDelete(s string, preparedQueryParams []any) (*CommandDelete, string, e
 		}
 	}
 
-	// Replace all question marks with prepared params: in wheren expressions
 	paramIdx := 0
+
+	// CAST/IN/preparedQueryParams in where expression:
+	// Convert AS and IN/NOT IN to functions so Go parser can work with them
+	cmd.WhereExpLexems = convertCastForAstParser(cmd.WhereExpLexems)
+	cmd.WhereExpLexems = convertInNotInForAstParser(cmd.WhereExpLexems)
+	// Replace all question marks with prepared param names: in where expressions
+	if paramIdx, cmd.WhereExpLexems, err = replaceQuestionMarksWithParamNamesInLexems(0, cmd.WhereExpLexems, preparedQueryParams); err != nil {
+		return nil, s, err
+	}
+
+	// Replace all question marks with prepared params: in wheren expressions
 	if len(cmd.WhereExpLexems) > 0 {
 		for lexemIdx := range cmd.WhereExpLexems {
 			if cmd.WhereExpLexems[lexemIdx].T == LexemQuestionMark {
@@ -2216,6 +2226,9 @@ func parseDelete(s string, preparedQueryParams []any) (*CommandDelete, string, e
 		cmd.WhereExpAst, err = lexemsToAstExpr(cmd.WhereExpLexems)
 		if err != nil {
 			return nil, s, fmt.Errorf("cannot build ast from delete where expression: %s", err.Error())
+		}
+		if cmd.WhereExpAst, err = convertIns(cmd.WhereExpAst); err != nil {
+			return nil, s, fmt.Errorf("cannot convert ins for delete where expression: %s", err.Error())
 		}
 	}
 
