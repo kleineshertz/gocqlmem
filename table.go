@@ -1511,7 +1511,7 @@ func (t *tableStore) execDelete(cmd *CommandDelete, preparedQueryParams []any) (
 	if len(rowsToDelete) > 0 {
 		for colIdx := range len(t.columnValues) {
 			for i := len(rowsToDelete) - 1; i >= 0; i-- {
-				t.columnValues[colIdx] = slices.Delete(t.columnValues[colIdx], i, i+1)
+				t.columnValues[colIdx] = slices.Delete(t.columnValues[colIdx], rowsToDelete[i], rowsToDelete[i]+1)
 			}
 		}
 	}

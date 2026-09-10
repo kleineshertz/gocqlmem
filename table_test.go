@@ -545,6 +545,10 @@ func TestTableDelete(t *testing.T) {
 		columnDefMap:            map[string]int{"col1": 0, "col2": 1, "col3": 2},
 		origColIdxToStoreColIdx: []int{0, 1, 2},
 	}
+	assert.Equal(t, "[a a c d]", fmt.Sprintf("%v", table.columnValues[0]))
+	assert.Equal(t, "[0 1 3 3]", fmt.Sprintf("%v", table.columnValues[1]))
+	assert.Equal(t, "[1 2 3 4]", fmt.Sprintf("%v", table.columnValues[2]))
+
 	var cmds []Command
 	var cmd *CommandDelete
 	var err error
@@ -560,16 +564,18 @@ func TestTableDelete(t *testing.T) {
 	isApplied, err = table.execDelete(cmd, preparedQueryParams)
 	assert.Nil(t, err)
 	assert.True(t, isApplied)
-	assert.Nil(t, table.columnValues[2][0])
-	assert.Nil(t, table.columnValues[2][1])
+	assert.Equal(t, "[a a c d]", fmt.Sprintf("%v", table.columnValues[0]))
+	assert.Equal(t, "[0 1 3 3]", fmt.Sprintf("%v", table.columnValues[1]))
+	assert.Equal(t, "[<nil> <nil> 3 4]", fmt.Sprintf("%v", table.columnValues[2]))
 
-	cmds, err = ParseCommands(`DELETE FROM ks1.t WHERE t.col1 = 'a'`, nil)
+	cmds, err = ParseCommands(`DELETE FROM ks1.t WHERE t.col1 IN ('c')`, nil)
 	assert.Nil(t, err)
 	cmd, ok = cmds[0].(*CommandDelete)
 	assert.True(t, ok)
 	isApplied, err = table.execDelete(cmd, nil)
 	assert.Nil(t, err)
 	assert.True(t, isApplied)
-	assert.Equal(t, "c", table.columnValues[0][0])
-	assert.Equal(t, "d", table.columnValues[0][1])
+	assert.Equal(t, "[a a d]", fmt.Sprintf("%v", table.columnValues[0]))
+	assert.Equal(t, "[0 1 3]", fmt.Sprintf("%v", table.columnValues[1]))
+	assert.Equal(t, "[<nil> <nil> 4]", fmt.Sprintf("%v", table.columnValues[2]))
 }
